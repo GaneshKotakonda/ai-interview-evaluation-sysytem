@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { interviewQuestions } from '../data/questions';
+import BehaviorMonitor from '../components/BehaviorMonitor';
 
 const STORAGE_KEY = 'ai-interview-progress';
 const DURATION_KEY = 'ai-interview-duration';
@@ -75,6 +76,7 @@ export default function Interview() {
   const [recordingSaved, setRecordingSaved] = useState(false);
   const [playbackUrl, setPlaybackUrl] = useState('');
   const [networkReady, setNetworkReady] = useState(navigator.onLine);
+  const visionMetricsRef = useRef(null);
 
   const currentQuestion = interviewQuestions[currentIndex];
   const currentResponse = responses[currentIndex];
@@ -147,6 +149,7 @@ export default function Interview() {
       const finalResponses = responses.map((item, index) => index === currentIndex ? { ...item, completed: Boolean(item.answer.trim()) } : item);
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ currentIndex, responses: finalResponses, secondsLeft }));
       localStorage.setItem(DURATION_KEY, String(INTERVIEW_SECONDS - secondsLeft));
+      localStorage.setItem('ai-interview-vision-metrics', JSON.stringify(visionMetricsRef.current || {}));
       streamRef.current?.getTracks().forEach((track) => track.stop());
       navigate('/interview-complete');
       return;
@@ -287,6 +290,13 @@ export default function Interview() {
         </section>
 
         <aside className="space-y-5">
+          <BehaviorMonitor
+            videoRef={videoRef}
+            active={cameraReady}
+            onMetricsChange={(nextMetrics) => {
+              visionMetricsRef.current = nextMetrics;
+            }}
+          />
           <div className="card p-5 xl:sticky xl:top-28">
             <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700">Live Indicators</h2>
             <div className="mt-5 space-y-3">
