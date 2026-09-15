@@ -11,11 +11,18 @@ function formatDuration(seconds) {
 export default function InterviewComplete() {
   const navigate = useNavigate();
   const duration = Number(localStorage.getItem('ai-interview-duration'));
+  let visionMetrics = null;
+  try {
+    visionMetrics = JSON.parse(localStorage.getItem('ai-interview-vision-metrics') || 'null');
+  } catch {
+    visionMetrics = null;
+  }
+
   const analysisItems = [
-    { label: 'Speech Analysis', state: 'Completed', complete: true },
-    { label: 'Answer Evaluation', state: 'Processing', complete: false },
-    { label: 'Communication Analysis', state: 'Processing', complete: false },
-    { label: 'Camera Engagement', state: 'Processing', complete: false },
+    { label: 'Speech Analysis', state: 'Pending AI service', complete: false },
+    { label: 'Answer Evaluation', state: 'Pending AI service', complete: false },
+    { label: 'Communication Analysis', state: 'Pending AI service', complete: false },
+    { label: 'Camera Engagement', state: visionMetrics ? `Completed · ${visionMetrics.eyeContact ?? 0}% eye contact` : 'Not available', complete: Boolean(visionMetrics) },
   ];
 
   return (
@@ -37,7 +44,7 @@ export default function InterviewComplete() {
         <div className="p-6 sm:p-8">
           <div className="flex items-center gap-3">
             <div className="rounded-xl bg-navy-50 p-2.5 text-navy-700"><Sparkles className="h-5 w-5" /></div>
-            <div><h2 className="font-bold text-slate-900">AI Analysis</h2><p className="text-sm text-slate-500">Demonstration status only — no real AI scoring is running.</p></div>
+            <div><h2 className="font-bold text-slate-900">AI Analysis</h2><p className="text-sm text-slate-500">Camera engagement is now measured from the interview video; speech and answer AI are still pending integration.</p></div>
           </div>
 
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
@@ -51,7 +58,7 @@ export default function InterviewComplete() {
             ))}
           </div>
 
-          <div className="mt-8 flex justify-center"><button onClick={() => navigate('/report')} className="primary-btn">View Demo Report</button></div>
+          <div className="mt-8 flex justify-center"><button onClick={() => navigate('/report')} className="primary-btn">View Evaluation Report</button></div>
         </div>
       </section>
     </div>
