@@ -30,7 +30,7 @@ export function AuthProvider({ children }) {
     setUser(auth.currentUser);
     return credential.user;
   };
-
+  
   const login = (email, password) => signInWithEmailAndPassword(auth, email, password);
   const logout = () => signOut(auth);
 
