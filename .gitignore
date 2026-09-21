@@ -1,4 +1,21 @@
+# Node dependencies and build output
 node_modules
 dist
 .DS_Store
 *.local
+
+# Environment variables & secrets (CRITICAL: Do NOT remove)
+.env
+*.env
+backend/.env
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Recorded video and audio uploads
+backend/uploads/
+uploads/
+*.webm
