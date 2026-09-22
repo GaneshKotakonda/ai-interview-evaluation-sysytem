@@ -77,7 +77,12 @@ export default function Login() {
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <label htmlFor="password" className="text-sm font-medium text-slate-700">Password</label>
-                  <span className="text-xs font-medium text-navy-700">Forgot Password?</span>
+                  <Link
+                    to="/forgot-password"
+                    className="text-xs font-medium text-navy-700 hover:text-navy-900"
+                  >
+                    Forgot Password?
+                  </Link>
                 </div>
                 <div className="relative">
                   <input id="password" type={showPassword ? 'text' : 'password'} className="input-field pr-11" placeholder="Enter your password" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete="current-password" />
