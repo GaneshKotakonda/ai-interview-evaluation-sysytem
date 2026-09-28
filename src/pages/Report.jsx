@@ -12,9 +12,11 @@ import { useNavigate } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
 import { reportData as fallbackMockData } from '../data/mockData';
 import { api } from '../services/api';
+import { readInterviewJourney } from '../utils/interviewJourney';
 
 export default function Report() {
   const navigate = useNavigate();
+  const journey = readInterviewJourney(localStorage.getItem('current-interview-id'));
 
   // -------------------------------------------------------------
   // BLOCK 1: Component State
@@ -42,7 +44,7 @@ export default function Report() {
       if (cachedReportStr) {
         try {
           const cached = JSON.parse(cachedReportStr);
-          if (cached && (cached.overall_score || cached.scores)) {
+          if (cached && cached.interview_id === interviewId && (cached.overall_score != null || cached.scores)) {
             setReport(cached);
             setIsLiveAiReport(true);
           }
@@ -217,6 +219,28 @@ export default function Report() {
           </div>
         </article>
       </section>
+
+      {journey.length > 0 && (
+        <section className="card p-6 sm:p-7">
+          <h2 className="text-lg font-bold text-slate-900">Adaptive Interview Journey</h2>
+          <p className="mt-1 text-sm text-slate-500">{journey.length} submitted turns, including any follow-up questions.</p>
+          <ol className="mt-5 space-y-4">
+            {journey.map((turn, index) => (
+              <li key={turn.response_id || turn.index || index} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">
+                  <span>Turn {turn.index || index + 1}</span>
+                  {turn.difficulty && <span className="rounded-full bg-slate-100 px-2.5 py-1">{turn.difficulty.replace(/^./, (c) => c.toUpperCase())}</span>}
+                  {turn.is_follow_up && <span className="rounded-full bg-teal-50 px-2.5 py-1 text-teal-700">AI Follow-up</span>}
+                  {turn.topic && <span>{turn.topic}</span>}
+                </div>
+                <h3 className="mt-2 font-semibold text-slate-900">{turn.question}</h3>
+                {turn.evaluation?.answer_quality_score != null && <p className="mt-2 text-sm text-slate-600">Technical score: {turn.evaluation.answer_quality_score}/100</p>}
+                {turn.evaluation?.feedback && <p className="mt-2 text-sm text-slate-600">{turn.evaluation.feedback}</p>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       {/* Two Column Section: Strengths & Areas to Improve */}
       <section className="grid gap-6 lg:grid-cols-2">

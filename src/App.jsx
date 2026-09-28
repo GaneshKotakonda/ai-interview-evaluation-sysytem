@@ -9,6 +9,9 @@ import Readiness from './pages/Readiness';
 import Interview from './pages/Interview';
 import InterviewComplete from './pages/InterviewComplete';
 import Report from './pages/Report';
+import Arena from './pages/Arena';
+import ArenaPlay from './pages/ArenaPlay';
+import ArenaResults from './pages/ArenaResults';
 
 export default function App() {
   return (
@@ -23,6 +26,9 @@ export default function App() {
           <Route path="/readiness" element={<Readiness />} />
           <Route path="/interview" element={<Interview />} />
           <Route path="/interview-complete" element={<InterviewComplete />} />
+          <Route path="/arena" element={<Arena />} />
+          <Route path="/arena/results" element={<ArenaResults />} />
+          <Route path="/arena/play" element={<ArenaPlay />} />
           <Route path="/report" element={<Report />} />
         </Route>
       </Route>

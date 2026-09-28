@@ -3,10 +3,29 @@
 -- 1. Candidates / Users Table
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email VARCHAR(255) UNIQUE NOT NULL,
-    full_name VARCHAR(255) NOT NULL,
+    firebase_uid VARCHAR(255),
+    email VARCHAR(255),
+    full_name VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Migration-safe Firebase identity upgrade for existing databases.
+-- Add the column as nullable, preserve every legacy user with a deterministic
+-- non-Firebase identifier, then enforce the final uniqueness/nullability rules.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255);
+
+UPDATE users
+SET firebase_uid = 'legacy:' || id::text
+WHERE firebase_uid IS NULL OR BTRIM(firebase_uid) = '';
+
+ALTER TABLE users ALTER COLUMN firebase_uid SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_firebase_uid_unique_idx ON users (firebase_uid);
+
+-- Firebase UID is the stable external identity. Email and display name are
+-- profile metadata and may be absent or change over time.
+ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE users ALTER COLUMN full_name DROP NOT NULL;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
 
 -- 2. Interview Sessions Table
 CREATE TABLE IF NOT EXISTS interviews (
@@ -44,6 +63,56 @@ CREATE TABLE IF NOT EXISTS interview_responses (
     video_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- 5. Comprehensive Evaluation Reports
+-- Adaptive metadata: additive migrations preserve legacy sessions/responses.
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS current_difficulty VARCHAR(10) NOT NULL DEFAULT 'medium'
+        CHECK (current_difficulty IN ('easy', 'medium', 'hard', 'expert')),
+    ADD COLUMN IF NOT EXISTS interview_mode VARCHAR(20) NOT NULL DEFAULT 'standard'
+        CHECK (interview_mode IN ('standard', 'game')),
+    ADD COLUMN IF NOT EXISTS current_turn INT NOT NULL DEFAULT 1 CHECK (current_turn >= 1),
+    ADD COLUMN IF NOT EXISTS max_turns INT NOT NULL DEFAULT 5 CHECK (max_turns BETWEEN 1 AND 20);
+
+-- Replace the previous inline mode constraint for existing installations.
+-- A single ALTER is atomic and preserves all rows; rerunning is safe.
+ALTER TABLE interviews
+    DROP CONSTRAINT IF EXISTS interviews_interview_mode_check,
+    ADD CONSTRAINT interviews_interview_mode_check
+        CHECK (interview_mode IN ('standard', 'game'));
+
+-- Questions must exist before answers; keeping them separate also preserves
+-- unanswered turns and their metadata when embedding generation is unavailable.
+CREATE TABLE IF NOT EXISTS interview_questions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    question_index INT NOT NULL CHECK (question_index >= 1),
+    question_text TEXT NOT NULL,
+    difficulty VARCHAR(10) NOT NULL CHECK (difficulty IN ('easy', 'medium', 'hard', 'expert')),
+    is_follow_up BOOLEAN NOT NULL DEFAULT FALSE,
+    topic TEXT NOT NULL,
+    adaptive_reason TEXT NOT NULL,
+    rubric_points JSONB NOT NULL CHECK (jsonb_typeof(rubric_points) = 'array'),
+    UNIQUE (interview_id, question_index)
+);
+
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS question_id UUID UNIQUE REFERENCES interview_questions(id),
+    ADD COLUMN IF NOT EXISTS difficulty VARCHAR(10)
+        CHECK (difficulty IN ('easy', 'medium', 'hard', 'expert')),
+    ADD COLUMN IF NOT EXISTS answer_quality_score INT CHECK (answer_quality_score BETWEEN 0 AND 100),
+    ADD COLUMN IF NOT EXISTS communication_score INT CHECK (communication_score BETWEEN 0 AND 100),
+    ADD COLUMN IF NOT EXISTS feedback TEXT,
+    ADD COLUMN IF NOT EXISTS strengths JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS improvements JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS missing_concepts JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS is_follow_up BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS adaptive_reason TEXT,
+    ADD COLUMN IF NOT EXISTS topic TEXT,
+    ADD COLUMN IF NOT EXISTS filler_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS evaluation_source VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS evaluated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS next_result JSONB;
 
 -- 5. Comprehensive Evaluation Reports
 CREATE TABLE IF NOT EXISTS evaluation_reports (
@@ -85,3 +154,29 @@ BEGIN
     RETURN dot / (sqrt(norm_a) * sqrt(norm_b));
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
+
+-- Arena keeps its game state separate from professional evaluations.
+ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS boss_round BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS arena_stats (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL UNIQUE REFERENCES interviews(id) ON DELETE CASCADE,
+    total_xp INTEGER NOT NULL DEFAULT 0 CHECK (total_xp >= 0),
+    current_streak INTEGER NOT NULL DEFAULT 0 CHECK (current_streak >= 0),
+    best_streak INTEGER NOT NULL DEFAULT 0 CHECK (best_streak >= current_streak),
+    highest_difficulty VARCHAR(10) NOT NULL DEFAULT 'medium'
+        CHECK (highest_difficulty IN ('easy', 'medium', 'hard', 'expert')),
+    hint_used BOOLEAN NOT NULL DEFAULT FALSE,
+    hint_turn INTEGER CHECK (hint_turn BETWEEN 1 AND 6),
+    hint_text TEXT,
+    boss_score INTEGER CHECK (boss_score BETWEEN 0 AND 100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS arena_turns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    response_id UUID NOT NULL UNIQUE REFERENCES interview_responses(id) ON DELETE CASCADE,
+    game_result JSONB NOT NULL CHECK (jsonb_typeof(game_result) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);

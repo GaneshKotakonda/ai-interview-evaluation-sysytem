@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { Check, CheckCircle2, Clock3, LoaderCircle, Sparkles, AlertCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { readInterviewJourney } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // BLOCK 1: Utility Functions
 // -------------------------------------------------------------
 // Formats the recorded interview duration in minutes and seconds
 function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds <= 0) return 'Approx. 10 minutes';
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${minutes}m ${remainder}s`;
@@ -31,6 +32,8 @@ export default function InterviewComplete() {
   }
 
   // AI Evaluation progress states
+  const journey = readInterviewJourney(interviewId);
+  const [attempt, setAttempt] = useState(0);
   const [evaluating, setEvaluating] = useState(true);
   const [evaluationError, setEvaluationError] = useState(null);
   const [evaluationReport, setEvaluationReport] = useState(null);
@@ -38,15 +41,14 @@ export default function InterviewComplete() {
   // -------------------------------------------------------------
   // BLOCK 3: Trigger Real RAG AI Evaluation in Backend
   // -------------------------------------------------------------
-  // Calls POST /api/interviews/{id}/complete to retrieve question rubrics,
-  // execute Gemini evaluation prompts, compute NLP filler words,
-  // combine vision metrics, and calculate overall score.
+  // Calls /complete to aggregate saved turn evaluations and vision metrics.
   useEffect(() => {
     let isMounted = true;
 
     async function triggerAiEvaluation() {
       if (!interviewId) {
         setEvaluating(false);
+        setEvaluationError('No interview session was found. Please return to the dashboard.');
         return;
       }
 
@@ -56,7 +58,8 @@ export default function InterviewComplete() {
 
         const report = await api.completeInterview(
           interviewId,
-          visionMetrics || { eyeContact: 75 }
+          visionMetrics || { eyeContact: 75 },
+          Number.isFinite(duration) && duration > 0 ? duration : 0,
         );
 
         if (!isMounted) return;
@@ -68,7 +71,7 @@ export default function InterviewComplete() {
         console.error('[EVALUATION ERROR]', err);
         if (isMounted) {
           setEvaluationError(
-            'The AI evaluation server encountered a delay or is starting up. You can view the preliminary report.'
+            'Your answers are saved, but the final report could not be generated. Please retry.'
           );
         }
       } finally {
@@ -81,7 +84,7 @@ export default function InterviewComplete() {
     return () => {
       isMounted = false;
     };
-  }, [interviewId]);
+  }, [duration, interviewId, attempt]);
 
   // -------------------------------------------------------------
   // BLOCK 4: Dynamic Analysis Checklist Items
@@ -93,21 +96,21 @@ export default function InterviewComplete() {
     {
       label: 'Speech & Text Alignment',
       state: evaluating
-        ? 'Analyzing spoken text with rubric embeddings...'
+        ? 'Collecting saved answer evaluations...'
         : 'Completed · Rubric cosine similarity matched',
       complete: !evaluating && !evaluationError,
     },
     {
       label: 'RAG Answer Evaluation',
       state: evaluating
-        ? 'Gemini evaluating answer depth against vector DB...'
+        ? 'Aggregating saved technical scores...'
         : 'Completed · Multi-criteria scores computed',
       complete: !evaluating && !evaluationError,
     },
     {
       label: 'Communication Analysis',
       state: evaluating
-        ? 'Scanning candidate transcripts for filler words...'
+        ? 'Combining saved communication metrics...'
         : `Completed · ${totalFillers} filler words analyzed`,
       complete: !evaluating && !evaluationError,
     },
@@ -142,7 +145,7 @@ export default function InterviewComplete() {
           <div className="mx-auto mt-8 grid max-w-2xl gap-3 sm:grid-cols-3">
             <div className="rounded-xl bg-slate-50 p-4">
               <p className="text-xs text-slate-500">Questions Answered</p>
-              <p className="mt-1 text-lg font-bold text-slate-900">5 Questions</p>
+              <p className="mt-1 text-lg font-bold text-slate-900">{journey.length} {journey.length === 1 ? 'Question' : 'Questions'}</p>
             </div>
             <div className="rounded-xl bg-slate-50 p-4">
               <Clock3 className="mx-auto h-4 w-4 text-navy-700" />
@@ -157,7 +160,7 @@ export default function InterviewComplete() {
                     <LoaderCircle className="h-4 w-4 animate-spin text-tealish-600" />
                     Grading
                   </>
-                ) : (
+                ) : evaluationError ? 'Report pending' : (
                   <>
                     <Check className="h-4 w-4" />
                     Evaluated
@@ -178,8 +181,8 @@ export default function InterviewComplete() {
               <h2 className="font-bold text-slate-900">Live AI Evaluation Processing</h2>
               <p className="text-sm text-slate-500">
                 {evaluating
-                  ? 'Please wait while Gemini evaluates answer quality against knowledge rubrics.'
-                  : 'All AI scoring models have completed evaluation.'}
+                  ? 'Combining saved answer evaluations and camera metrics into your final report.'
+                  : evaluationError ? 'Report generation needs a retry.' : 'Your final report is ready.'}
               </p>
             </div>
           </div>
@@ -211,18 +214,20 @@ export default function InterviewComplete() {
                 <div>
                   <p className="text-sm font-semibold text-slate-800">{item.label}</p>
                   <p className={`text-xs ${item.complete ? 'text-emerald-600' : 'text-navy-600'}`}>
-                    {item.state}
+                    {evaluationError && !item.complete ? 'Waiting for report generation' : item.state}
                   </p>
                 </div>
               </div>
             ))}
           </div>
 
+          {evaluationError && interviewId && <button className="secondary-btn mt-6" disabled={evaluating} onClick={() => setAttempt((value) => value + 1)}>Retry Report Generation</button>}
+
           {/* Navigation to Full Performance Report */}
           <div className="mt-8 flex justify-center">
             <button
               onClick={() => navigate('/report')}
-              disabled={evaluating}
+              disabled={evaluating || !evaluationReport}
               className="primary-btn"
             >
               {evaluating ? (

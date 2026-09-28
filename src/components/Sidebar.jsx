@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  Gamepad2,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -13,6 +14,7 @@ import { useAuth } from '../context/AuthContext';
 const items = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', enabled: true },
   { label: 'Start Interview', icon: Mic, to: '/readiness', enabled: true },
+  { label: 'Interview Arena', icon: Gamepad2, to: '/arena', enabled: true },
   { label: 'My Interviews', icon: BarChart3, enabled: false },
   { label: 'Reports', icon: FileText, enabled: false },
   { label: 'Profile', icon: UserRound, enabled: false },

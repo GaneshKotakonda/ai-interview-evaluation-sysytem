@@ -2,11 +2,11 @@ import os
 import shutil
 import uuid
 import json
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 # Ensure .env is loaded from backend directory
@@ -18,6 +18,8 @@ load_dotenv()
 import database
 import gemini_service
 import nlp_evaluator
+import adaptive_service
+import arena
 
 # -------------------------------------------------------------
 # BLOCK 1: FastAPI Application Initialization & CORS
@@ -66,95 +68,134 @@ def on_startup():
 # -------------------------------------------------------------
 # Pydantic validates incoming JSON request payloads.
 class StartInterviewRequest(BaseModel):
+    firebase_uid: Optional[str] = None
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    # Kept as a compatibility alias for older frontend builds.
     user_id: Optional[str] = None
     role_title: str = "Software Engineer"
     job_description: Optional[str] = None
+    interview_mode: Literal["standard", "game"] = "standard"
+    max_turns: int = Field(default=5, ge=1, le=20)
+
+class HintRequest(BaseModel):
+    current_turn: int = Field(ge=1, le=6)
+
+
+class NextQuestionRequest(BaseModel):
+    # Optional token makes retries unambiguous even after another answer arrives.
+    response_id: Optional[uuid.UUID] = None
 
 class EvaluateInterviewRequest(BaseModel):
     vision_metrics: Optional[dict] = None  # Received from Harsha's BehaviorMonitor.jsx
+    duration_seconds: int = Field(default=0, ge=0)
+
+
+def completion_response(report):
+    """Stable completion contract for initial submission and retry."""
+    return {
+        "interview_id": str(report["interview_id"]),
+        "overall_score": report["overall_score"],
+        "scores": [
+            {"label": label, "value": report[field]}
+            for label, field in (
+                ("Answer Quality", "answer_quality_score"),
+                ("Communication", "communication_score"),
+                ("Voice Confidence", "voice_confidence_score"),
+                ("Camera Engagement", "camera_engagement_score"),
+            )
+        ],
+        "strengths": report["strengths"], "improvements": report["improvements"],
+        "feedback": report["summary_feedback"], "nlp_metrics": report["nlp_metrics"],
+    }
 
 
 # -------------------------------------------------------------
 # BLOCK 5: Endpoint - Start Interview & Generate Questions with Gemini
 # -------------------------------------------------------------
 # 1. Inserts a new row in 'interviews' table with role title and optional Job Description.
-# 2. Calls Gemini to generate 5 role-specific questions and rubric points tailored to JD.
-# 3. Vectorizes each rubric point using Gemini text-embedding-004.
+# 2. Generates only the initial medium question and its private rubric.
+# 3. Vectorizes each rubric point using the existing embedding service.
 # 4. Saves the rubric points and embeddings into 'question_rubrics' in PostgreSQL.
-# 5. Returns the interview_id, questions list, and job_description to the frontend.
+# 5. Returns the first public question and adaptive turn metadata.
 @app.post("/api/interviews/start")
 def start_interview(payload: StartInterviewRequest):
+    firebase_uid = (payload.firebase_uid or payload.user_id or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=400, detail="firebase_uid is required.")
+
+    max_turns = 6 if payload.interview_mode == "game" else payload.max_turns
+    email = payload.email.strip() if payload.email and payload.email.strip() else None
+    full_name = payload.full_name.strip() if payload.full_name and payload.full_name.strip() else None
+
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Step A: Validate and handle user_id safely for foreign key constraint
-            valid_user_id = None
-            if payload.user_id and payload.user_id.strip():
-                try:
-                    user_uuid = str(uuid.UUID(payload.user_id.strip()))
-                    cur.execute("SELECT id FROM users WHERE id = %s;", (user_uuid,))
-                    if not cur.fetchone():
-                        cur.execute(
-                            """
-                            INSERT INTO users (id, email, full_name)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (id) DO NOTHING;
-                            """,
-                            (user_uuid, f"user_{user_uuid[:8]}@example.com", "Interview Candidate")
-                        )
-                    valid_user_id = user_uuid
-                except (ValueError, AttributeError):
-                    # Not a valid UUID (e.g. Firebase string ID); store as NULL to avoid constraint violation
-                    valid_user_id = None
+            # Step A: Resolve the external Firebase identity to the internal UUID.
+            cur.execute("SELECT id FROM users WHERE firebase_uid = %s;", (firebase_uid,))
+            user_row = cur.fetchone()
+
+            if user_row:
+                valid_user_id = str(user_row["id"])
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET email = COALESCE(%s, email),
+                        full_name = COALESCE(%s, full_name)
+                    WHERE id = %s;
+                    """,
+                    (email, full_name, valid_user_id)
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO users (firebase_uid, email, full_name)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (firebase_uid) DO UPDATE
+                    SET email = COALESCE(EXCLUDED.email, users.email),
+                        full_name = COALESCE(EXCLUDED.full_name, users.full_name)
+                    RETURNING id;
+                    """,
+                    (firebase_uid, email, full_name)
+                )
+                valid_user_id = str(cur.fetchone()["id"])
 
             # Create interview session with target role and optional job description
             cur.execute(
                 """
-                INSERT INTO interviews (user_id, role_title, job_description, status)
-                VALUES (%s, %s, %s, 'in_progress')
+                INSERT INTO interviews (user_id, role_title, job_description, status, max_turns, interview_mode)
+                VALUES (%s, %s, %s, 'in_progress', %s, %s)
                 RETURNING id;
                 """,
-                (valid_user_id, payload.role_title, payload.job_description)
+                (valid_user_id, payload.role_title, payload.job_description, max_turns, payload.interview_mode)
             )
             interview_id = str(cur.fetchone()["id"])
 
-            # Step B: Call Gemini to generate questions + rubric points tailored to role & JD
-            questions_data = gemini_service.generate_interview_questions(
-                payload.role_title, payload.job_description
+            content = gemini_service.generate_adaptive_question(
+                role_title=payload.role_title,
+                job_description=(payload.job_description or "")[:4000],
+                current_difficulty="medium", is_follow_up=False,
+                recent_history=[], turn_number=1, max_turns=max_turns,
             )
-
-            # Step C: Generate vector embeddings for each rubric point and save in PostgreSQL
-            for item in questions_data:
-                q_index = item["index"]
-                q_text = item["question"]
-                for rubric in item.get("rubric_points", []):
-                    # Embed rubric chunk with Gemini text-embedding-004 (768 numbers)
-                    try:
-                        embedding_vector = gemini_service.get_embedding(rubric)
-                    except Exception as emb_err:
-                        print(f"[EMBEDDING WARNING] Failed for rubric '{rubric}': {emb_err}")
-                        embedding_vector = []
-
-                    if embedding_vector and len(embedding_vector) > 0:
-                        cur.execute(
-                            """
-                            INSERT INTO question_rubrics (
-                                interview_id, question_index, question_text, ideal_concept_chunk, embedding
-                            ) VALUES (%s, %s, %s, %s, %s);
-                            """,
-                            (interview_id, q_index, q_text, rubric, embedding_vector)
-                        )
-
+            question = adaptive_service.public_question(
+                adaptive_service.store_question(cur, interview_id, 1, content)
+            )
+            if payload.interview_mode == "game":
+                arena.initialize(cur, interview_id)
             conn.commit()
             return {
                 "interview_id": interview_id,
                 "role_title": payload.role_title,
                 "job_description": payload.job_description,
-                "questions": questions_data
+                "interview_mode": payload.interview_mode,
+                "current_turn": 1, "current_difficulty": "medium",
+                "max_turns": max_turns, "question": question,
+                # Shape compatibility only: one turn, never a pre-generated set.
+                "questions": [question],
             }
-    except Exception as error:
+    except Exception:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=str(error))
+        raise HTTPException(status_code=500, detail="Could not start the interview. Please retry.")
     finally:
         conn.close()
 
@@ -169,90 +210,112 @@ def start_interview(payload: StartInterviewRequest):
 # 4. Runs Cosine Similarity in PostgreSQL against the question's rubric points.
 # 5. Saves the response, embedding, and video path in 'interview_responses'.
 @app.post("/api/interviews/{interview_id}/submit-answer")
-async def submit_answer(
+def submit_answer(
     interview_id: str,
     question_index: int = Form(...),
     question_text: str = Form(...),
     candidate_answer: str = Form(""),
     video: Optional[UploadFile] = File(None)
 ):
-    try:
-        uuid.UUID(interview_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid interview_id UUID format.")
-
     conn = database.get_db_connection()
     try:
-        # Step A: Save video file to disk if uploaded
-        video_url = None
-        if video and video.filename:
-            interview_folder = os.path.join(UPLOAD_DIR, interview_id)
-            os.makedirs(interview_folder, exist_ok=True)
-            video_filename = f"q_{question_index}.webm"
-            saved_file_path = os.path.join(interview_folder, video_filename)
-
-            with open(saved_file_path, "wb") as buffer:
-                shutil.copyfileobj(video.file, buffer)
-
-            video_url = f"/uploads/{interview_id}/{video_filename}"
-
-        # Step B: Generate vector embedding of candidate's answer
-        answer_vector = []
-        similarity_score = 0.0
-        if candidate_answer.strip():
-            try:
-                answer_vector = gemini_service.get_embedding(candidate_answer)
-                if answer_vector:
-                    # Query PostgreSQL for the top rubric matches & cosine similarity
-                    _, similarity_score = nlp_evaluator.retrieve_top_rubric_matches(
-                        conn, interview_id, question_index, answer_vector
-                    )
-            except Exception as emb_err:
-                print(f"[SIMILARITY WARNING] Failed computing similarity: {emb_err}")
-                similarity_score = 0.5
-
-        # Step C: Insert answer row into interview_responses table
         with conn.cursor() as cur:
+            interview = adaptive_service.lock_interview(cur, interview_id)
+            adaptive_service.require_active(interview)
+            # Find a previously accepted submission before checking current_turn,
+            # so a retry after advancement cannot overwrite its answer or video.
             cur.execute(
-                """
-                INSERT INTO interview_responses (
-                    interview_id, question_index, question_text, candidate_answer,
-                    answer_embedding, semantic_similarity_score, video_url
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id;
-                """,
-                (
-                    interview_id,
-                    question_index,
-                    question_text,
-                    candidate_answer,
-                    answer_vector if answer_vector else None,
-                    similarity_score,
-                    video_url
-                )
+                "SELECT * FROM interview_questions WHERE interview_id = %s AND question_index = %s;",
+                (interview_id, question_index),
             )
-            response_id = str(cur.fetchone()["id"])
+            question = cur.fetchone()
+            if question:
+                previous = adaptive_service.existing_submission(cur, question)
+                if previous:
+                    if previous["candidate_answer"] != candidate_answer:
+                        raise HTTPException(409, "This question already has an accepted answer.")
+                    return adaptive_service.submission_result(previous)
+            question = adaptive_service.question_for_submission(cur, interview, question_index)
+            # Client question_text is retained for compatibility but never trusted
+            # for evaluation. Grade only the question issued by the server.
+            video_url = None
+            if video and video.filename:
+                interview_folder = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)))
+                os.makedirs(interview_folder, exist_ok=True)
+                video_filename = f"q_{question_index}.webm"
+                with open(os.path.join(interview_folder, video_filename), "wb") as buffer:
+                    shutil.copyfileobj(video.file, buffer)
+                video_url = f"/uploads/{interview_id}/{video_filename}"
+            response = adaptive_service.evaluate_and_store(
+                conn, cur, interview, question, candidate_answer, video_url,
+            )
             conn.commit()
-
-        return {
-            "status": "success",
-            "response_id": response_id,
-            "semantic_similarity_score": round(similarity_score, 3),
-            "video_url": video_url
-        }
-    except Exception as error:
+            return adaptive_service.submission_result(response)
+    except HTTPException:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=str(error))
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(500, "Could not save and evaluate this answer. Please retry.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/interviews/{interview_id}/hint")
+def arena_hint(interview_id: str, payload: HintRequest):
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            interview = adaptive_service.lock_interview(cur, interview_id)
+            result = arena.use_hint(cur, interview, payload.current_turn)
+            conn.commit()
+            return result
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(500, 'Could not request a hint. Please retry.')
+    finally:
+        conn.close()
+
+
+@app.get("/api/interviews/{interview_id}/arena-results")
+def arena_results(interview_id: str):
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            interview = adaptive_service.lock_interview(cur, interview_id)
+            return arena.results(cur, interview)
+    finally:
+        conn.close()
+
+
+@app.post("/api/interviews/{interview_id}/next-question")
+def next_question(interview_id: str, payload: Optional[NextQuestionRequest] = None):
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            interview = adaptive_service.lock_interview(cur, interview_id)
+            result = adaptive_service.advance(cur, interview, payload.response_id if payload else None)
+            conn.commit()
+            return result
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(500, "Could not advance the interview. Please retry.")
     finally:
         conn.close()
 
 
 # -------------------------------------------------------------
-# BLOCK 7: Endpoint - Complete Interview & Run RAG Evaluation
+# BLOCK 7: Endpoint - Complete Interview & Aggregate Saved Evaluations
 # -------------------------------------------------------------
 # Called when the candidate finishes the interview.
 # 1. Fetches all candidate responses from 'interview_responses'.
-# 2. For each response, retrieves rubric points and runs RAG Gemini evaluation.
+# 2. Reuses immediate evaluations; only pre-migration answers need batch evaluation.
 # 3. Combines Answer Quality + Communication (filler analysis) + Harsha's Vision metrics.
 # 4. Computes the overall score and saves the report into 'evaluation_reports'.
 # 5. Returns the complete structured report.
@@ -267,19 +330,21 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
     try:
         # Step A: Fetch all candidate responses and interview JD for this interview
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT job_description, role_title FROM interviews WHERE id = %s;
-                """,
-                (interview_id,)
-            )
-            intv_row = cur.fetchone()
-            saved_jd = intv_row["job_description"] if intv_row else None
-            saved_role = intv_row["role_title"] if intv_row else "Software Engineer"
+            intv_row = adaptive_service.lock_interview(cur, interview_id)
+            if intv_row.get("interview_mode") == "game":
+                raise HTTPException(409, "Arena completes through next-question; use arena-results for its summary.")
+            if intv_row["status"] in ("completed", "evaluated"):
+                cur.execute("SELECT * FROM evaluation_reports WHERE interview_id = %s;", (interview_id,))
+                report = cur.fetchone()
+                if report:
+                    return completion_response(report)
+            adaptive_service.require_active(intv_row)
+            saved_jd = intv_row["job_description"]
+            saved_role = intv_row["role_title"]
 
             cur.execute(
                 """
-                SELECT question_index, question_text, candidate_answer, semantic_similarity_score
+                SELECT *
                 FROM interview_responses
                 WHERE interview_id = %s
                 ORDER BY question_index ASC;
@@ -291,7 +356,14 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
         if not responses:
             raise HTTPException(status_code=400, detail="No answers found for this interview.")
 
-        # Step B: Prepare all responses and run High-Speed Batch Evaluation in ONE Gemini request
+        adaptive_responses = [r for r in responses if r.get("question_id")]
+        if adaptive_responses and (
+            len(adaptive_responses) != intv_row["max_turns"]
+            or any(r["evaluated_at"] is None for r in adaptive_responses)
+        ):
+            raise HTTPException(409, "Answer all configured turns before completing this interview.")
+
+        # Step B: Aggregate NLP metrics; prepare only legacy answers for evaluation.
         evaluation_items = []
         nlp_filler_summary = {"total_fillers": 0, "breakdown": {}}
 
@@ -307,7 +379,11 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
             for word, count in filler_result["breakdown"].items():
                 nlp_filler_summary["breakdown"][word] = nlp_filler_summary["breakdown"].get(word, 0) + count
 
-            # 2. Retrieve the rubric points from PostgreSQL
+            # Adaptive answers were already evaluated at submission.
+            if item.get("question_id"):
+                continue
+
+            # Compatibility only: pre-migration responses have no saved evaluation.
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -328,12 +404,19 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
                 "filler_count": filler_result["total_count"]
             })
 
-        # Step B.2: High-Speed Batch Evaluation (1 single API call instead of 5 in sequence)
-        batch_eval_result = gemini_service.batch_evaluate_interview(
-            role_title=saved_role,
-            job_description=saved_jd,
-            evaluation_items=evaluation_items
-        )
+        # Step B.2: Reuse scores already persisted by adaptive answer submission.
+        if adaptive_responses:
+            batch_eval_result = {
+                "question_evaluations": adaptive_responses,
+                "overall_summary": "",
+            }
+        else:
+            # Legacy reports can still be finalized; new sessions never use this path.
+            batch_eval_result = gemini_service.batch_evaluate_interview(
+                role_title=saved_role,
+                job_description=saved_jd,
+                evaluation_items=evaluation_items
+            )
 
         q_eval_list = batch_eval_result.get("question_evaluations", [])
         total_quality_score = 0
@@ -378,7 +461,7 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
             summary_feedback = gemini_summary
         else:
             summary_feedback = (
-                f"Overall performance was solid with a score of {overall_score}/100. "
+                f"Overall score: {overall_score}/100. "
                 f"Answer quality averaged {avg_answer_quality}% and camera engagement reached {camera_engagement}%. "
                 f"Focus on reducing the {nlp_filler_summary['total_fillers']} filler words used across the session."
             )
@@ -411,30 +494,32 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
             cur.execute(
                 """
                 UPDATE interviews
-                SET status = 'evaluated', overall_score = %s, completed_at = NOW()
+                SET status = 'completed',
+                    overall_score = %s,
+                    duration_seconds = %s,
+                    completed_at = NOW()
                 WHERE id = %s;
                 """,
-                (overall_score, interview_id)
+                (overall_score, payload.duration_seconds, interview_id)
             )
             conn.commit()
 
-        return {
+        return completion_response({
             "interview_id": interview_id,
             "overall_score": overall_score,
-            "scores": [
-                {"label": "Answer Quality", "value": avg_answer_quality},
-                {"label": "Communication", "value": avg_communication},
-                {"label": "Voice Confidence", "value": voice_confidence},
-                {"label": "Camera Engagement", "value": camera_engagement}
-            ],
-            "strengths": top_strengths,
-            "improvements": top_improvements,
-            "feedback": summary_feedback,
-            "nlp_metrics": nlp_filler_summary
-        }
-    except Exception as error:
+            "answer_quality_score": avg_answer_quality,
+            "communication_score": avg_communication,
+            "voice_confidence_score": voice_confidence,
+            "camera_engagement_score": camera_engagement,
+            "strengths": top_strengths, "improvements": top_improvements,
+            "summary_feedback": summary_feedback, "nlp_metrics": nlp_filler_summary,
+        })
+    except HTTPException:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=str(error))
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail="Could not complete this interview. Please retry.")
     finally:
         conn.close()
 
@@ -470,25 +555,27 @@ def get_interview_report(interview_id: str):
 # -------------------------------------------------------------
 # BLOCK 9: Endpoint - Get User Past Interviews (For Dashboard.jsx)
 # -------------------------------------------------------------
-@app.get("/api/interviews/user/{user_id}")
-def get_user_interviews(user_id: str):
-    # Validate UUID format to avoid Postgres syntax error
-    try:
-        user_uuid = str(uuid.UUID(user_id))
-    except (ValueError, AttributeError):
-        return []
-
+@app.get("/api/interviews/user/{firebase_uid}")
+def get_user_interviews(firebase_uid: str):
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT id FROM users WHERE firebase_uid = %s;",
+                (firebase_uid,)
+            )
+            user_row = cur.fetchone()
+            if not user_row:
+                return []
+
+            cur.execute(
                 """
-                SELECT id, role_title, status, duration_seconds, overall_score, created_at, completed_at
+                SELECT id, role_title, interview_mode, status, duration_seconds, overall_score, created_at, completed_at
                 FROM interviews
                 WHERE user_id = %s
                 ORDER BY created_at DESC;
                 """,
-                (user_uuid,)
+                (str(user_row["id"]),)
             )
             rows = cur.fetchall()
         return rows

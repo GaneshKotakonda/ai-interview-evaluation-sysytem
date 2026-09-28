@@ -1,24 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft,
   ArrowRight,
   Camera,
   Check,
   CircleDot,
   Loader2,
   Mic,
-  Save,
   Square,
   Video,
   Wifi,
   Sparkles,
-  AlertCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import {
-  interviewQuestions as fallbackQuestions,
-  generateJdFallbackQuestions,
-} from '../data/questions';
 import BehaviorMonitor from '../components/BehaviorMonitor';
 import { api } from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -62,12 +55,13 @@ export default function Interview() {
   // -------------------------------------------------------------
   // BLOCK 2: Component State Management
   // -------------------------------------------------------------
-  // Dynamic question list fetched from Gemini via FastAPI backend
-  const [questions, setQuestions] = useState([]);
+  // One public question issued by the adaptive backend
+  const [currentQuestion, setCurrentQuestion] = useState(null);
+  const [currentTurn, setCurrentTurn] = useState(1);
+  const [maxTurns, setMaxTurns] = useState(1);
   // Current database interview session UUID
   const [interviewId, setInterviewId] = useState(null);
-  // Active question index (0 to questions.length - 1)
-  const [currentIndex, setCurrentIndex] = useState(0);
+
   // Array of candidate answers corresponding to each question
   const [responses, setResponses] = useState([]);
   // Countdown timer in seconds
@@ -83,14 +77,20 @@ export default function Interview() {
   const [playbackUrl, setPlaybackUrl] = useState('');
   // Loading and upload indicators
   const [loadingQuestions, setLoadingQuestions] = useState(true);
-  const [submittingAnswer, setSubmittingAnswer] = useState(false);
-  const [isLiveBackend, setIsLiveBackend] = useState(true);
+  const [phase, setPhase] = useState('answering');
+  const [flowError, setFlowError] = useState('');
+  const [startAttempt, setStartAttempt] = useState(0);
+  const busyRef = useRef(false);
+  const responseIdRef = useRef(null);
+  const startRequestRef = useRef(null);
+  const recordingFinishedRef = useRef(null);
+  const resolveRecordingRef = useRef(null);
 
   // -------------------------------------------------------------
   // BLOCK 3: Initialize Interview & Fetch AI Questions
   // -------------------------------------------------------------
   // Calls POST /api/interviews/start to create session and generate
-  // 5 role-specific questions and ideal rubric embeddings using Gemini,
+  // the first role-specific question using Gemini,
   // specifically tailored to the target role and custom job description.
   const targetRole = useMemo(
     () => localStorage.getItem('target-role-title') || 'Software Engineer',
@@ -110,57 +110,33 @@ export default function Interview() {
       const activeJd = localStorage.getItem('target-job-description') || '';
 
       try {
-        // Attempt to create session via FastAPI backend with custom role & JD
-        const sessionData = await api.startInterview(
-          activeRole,
-          user?.uid || null,
-          activeJd || null
-        );
-        
-        if (!isMounted) return;
-
-        if (sessionData && sessionData.questions && sessionData.questions.length > 0) {
-          const remoteQuestions = sessionData.questions;
-          setQuestions(remoteQuestions);
-          setInterviewId(sessionData.interview_id);
-          setIsLiveBackend(true);
-          localStorage.setItem(INTERVIEW_ID_KEY, sessionData.interview_id);
-
-          setResponses(
-            remoteQuestions.map((q, idx) => ({
-              questionId: q.index || idx + 1,
-              question: q.question,
-              answer: '',
-              completed: false,
-            }))
+        // Share the start request across StrictMode effect replays.
+        if (!startRequestRef.current) {
+          startRequestRef.current = api.startInterview(
+            activeRole, user?.uid || null, activeJd || null,
+            user?.email || null, user?.displayName || null,
           );
-        } else {
-          throw new Error('Invalid question format received from backend');
         }
-      } catch (err) {
-        console.warn('[INTERVIEW INIT] Backend not reachable, generating JD-tailored fallback questions:', err);
+        const sessionData = await startRequestRef.current;
         if (!isMounted) return;
-
-        setIsLiveBackend(false);
-
-        // If the backend is temporarily offline, dynamically generate questions
-        // tailored directly to the Job Description rather than static questions
-        const dynamicFallback = activeJd
-          ? generateJdFallbackQuestions(activeRole, activeJd)
-          : fallbackQuestions.map((q) => ({
-              index: q.id,
-              question: q.text,
-            }));
-
-        setQuestions(dynamicFallback);
-        setResponses(
-          dynamicFallback.map((q) => ({
-            questionId: q.index,
-            question: q.question,
-            answer: '',
-            completed: false,
-          }))
-        );
+        if (!sessionData?.question?.question || !sessionData.interview_id) {
+          throw new Error('Invalid interview session');
+        }
+        setCurrentQuestion(sessionData.question);
+        setCurrentTurn(sessionData.current_turn);
+        setMaxTurns(sessionData.max_turns);
+        setInterviewId(sessionData.interview_id);
+        setResponses([{ ...sessionData.question, questionId: sessionData.question.index, answer: '', completed: false }]);
+        localStorage.setItem(INTERVIEW_ID_KEY, sessionData.interview_id);
+        localStorage.removeItem('latest-evaluation-report');
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(DURATION_KEY);
+        localStorage.removeItem('ai-interview-vision-metrics');
+        setFlowError('');
+      } catch (err) {
+        if (!isMounted) return;
+        startRequestRef.current = null;
+        setFlowError('Unable to start your interview. Please check your connection and retry.');
       } finally {
         if (isMounted) setLoadingQuestions(false);
       }
@@ -171,18 +147,15 @@ export default function Interview() {
     return () => {
       isMounted = false;
     };
-  }, [user]);
+  }, [user?.uid, startAttempt]);
 
-  // Current active question item (handles both dynamic and fallback format)
-  const currentQuestion = useMemo(() => {
-    if (!questions || questions.length === 0) return null;
-    return questions[currentIndex] || null;
-  }, [questions, currentIndex]);
-
-  const currentQuestionText = currentQuestion ? (currentQuestion.question || currentQuestion.text) : '';
+  const currentIndex = responses.length - 1;
+  const currentQuestionText = currentQuestion?.question || '';
   const currentResponse = responses[currentIndex] || { answer: '' };
-  const totalQuestions = questions.length || 5;
-  const progress = totalQuestions > 0 ? ((currentIndex + 1) / totalQuestions) * 100 : 0;
+  const totalQuestions = maxTurns;
+  const progress = (currentTurn / maxTurns) * 100;
+  const busy = ['recording', 'submitting', 'advancing', 'complete'].includes(phase);
+  const answerLocked = busy || currentResponse.completed;
 
   // -------------------------------------------------------------
   // BLOCK 4: Hardware & WebRTC Camera/Microphone Setup
@@ -259,12 +232,12 @@ export default function Interview() {
 
   useEffect(() => {
     if (responses.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ currentIndex, responses, secondsLeft }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ interviewId, currentIndex, current_turn: currentTurn, max_turns: maxTurns, responses, secondsLeft }));
     }
-  }, [currentIndex, responses, secondsLeft]);
+  }, [interviewId, currentIndex, currentTurn, maxTurns, responses, secondsLeft]);
 
   const answeredCount = useMemo(
-    () => responses.filter((item) => item.answer && item.answer.trim()).length,
+    () => responses.filter((item) => item.completed).length,
     [responses]
   );
 
@@ -272,16 +245,9 @@ export default function Interview() {
   // BLOCK 6: User Input Handling & Saving
   // -------------------------------------------------------------
   const updateAnswer = (answer) => {
+    if (answerLocked || busyRef.current) return;
     setResponses((current) =>
       current.map((item, index) => (index === currentIndex ? { ...item, answer } : item))
-    );
-  };
-
-  const saveCurrentResponse = () => {
-    setResponses((current) =>
-      current.map((item, index) =>
-        index === currentIndex ? { ...item, completed: Boolean(item.answer.trim()) } : item
-      )
     );
   };
 
@@ -290,6 +256,7 @@ export default function Interview() {
   // -------------------------------------------------------------
   // Starts recording audio/video into memory buffers.
   const startRecording = () => {
+    if (answerLocked || busyRef.current) return;
     const stream = streamRef.current;
     if (!stream || typeof MediaRecorder === 'undefined') {
       setMediaError('MediaRecorder is not supported in this browser.');
@@ -319,6 +286,7 @@ export default function Interview() {
         }
       };
 
+      recordingFinishedRef.current = new Promise((resolve) => { resolveRecordingRef.current = resolve; });
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: 'video/webm' });
         recordedBlobRef.current = blob; // Save blob for backend upload
@@ -327,6 +295,8 @@ export default function Interview() {
         setPlaybackUrl(url);
         setRecordingSaved(true);
         setRecording(false);
+        resolveRecordingRef.current?.();
+        resolveRecordingRef.current = null;
       };
 
       recorder.start();
@@ -347,69 +317,80 @@ export default function Interview() {
   // -------------------------------------------------------------
   // Submits the candidate's answer + video to the backend before
   // navigating to the next question or finishing the interview.
-  const goPrevious = () => {
-    saveCurrentResponse();
-    setRecordingSaved(false);
-    setCurrentIndex((index) => Math.max(0, index - 1));
-  };
-
   const goNext = async () => {
-    saveCurrentResponse();
-    if (recording) {
-      stopRecording();
-    }
-
-    const qIdx = currentQuestion?.index || currentIndex + 1;
-    const qText = currentQuestionText;
-    const ansText = currentResponse.answer || '';
-    const videoBlob = recordedBlobRef.current;
-
-    // Send answer and video to backend if an active interviewId exists
-    if (interviewId) {
-      try {
-        setSubmittingAnswer(true);
-        await api.submitAnswer(interviewId, {
-          questionIndex: qIdx,
-          questionText: qText,
-          candidateAnswer: ansText,
-          videoBlob: videoBlob,
+    if (busyRef.current || phase === 'complete' || !interviewId) return;
+    if (!responseIdRef.current && !currentResponse.answer.trim()) return;
+    busyRef.current = true;
+    setFlowError('');
+    let savedResponses = responses;
+    try {
+      if (!responseIdRef.current) {
+        // onstop follows the final dataavailable event. Wait before reading the Blob.
+        if (recordingFinishedRef.current) {
+          setPhase('recording');
+          stopRecording();
+          await recordingFinishedRef.current;
+        }
+        setPhase('submitting');
+        const result = await api.submitAnswer(interviewId, {
+          questionIndex: currentQuestion.index,
+          questionText: currentQuestionText,
+          candidateAnswer: currentResponse.answer,
+          videoBlob: recordedBlobRef.current,
         });
-      } catch (uploadErr) {
-        console.warn('[SUBMIT ANSWER WARNING] Could not sync with backend:', uploadErr);
-      } finally {
-        setSubmittingAnswer(false);
+        if (!result?.response_id) throw new Error('Missing response identifier');
+        responseIdRef.current = result.response_id;
+        savedResponses = responses.map((item, index) => index === currentIndex
+          ? { ...item, completed: true, response_id: result.response_id, evaluation: result.evaluation }
+          : item);
+        setResponses(savedResponses);
       }
+      setPhase('advancing');
+      const result = await api.nextQuestion(interviewId, responseIdRef.current);
+      if (!result.is_complete && !result.next_question?.question) {
+        throw new Error('Missing next question');
+      }
+      savedResponses = savedResponses.map((item, index) => index === currentIndex
+        ? { ...item, evaluation: result.evaluation || item.evaluation, adaptation: result.adaptation }
+        : item);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        interviewId, currentIndex, current_turn: result.current_turn, max_turns: result.max_turns,
+        responses: savedResponses, secondsLeft,
+      }));
+
+      // Release per-answer recording only after advancement succeeds.
+      recordedBlobRef.current = null;
+      recordingFinishedRef.current = null;
+      setRecordingSaved(false);
+      if (playbackUrlRef.current) {
+        URL.revokeObjectURL(playbackUrlRef.current);
+        playbackUrlRef.current = null;
+        setPlaybackUrl('');
+      }
+      if (result.is_complete) {
+        setResponses(savedResponses);
+        setPhase('complete');
+        localStorage.setItem(DURATION_KEY, String(INTERVIEW_SECONDS - secondsLeft));
+        localStorage.setItem('ai-interview-vision-metrics', JSON.stringify(visionMetricsRef.current || { eyeContact: 75 }));
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        navigate('/interview-complete');
+        return;
+      }
+      responseIdRef.current = null;
+      setCurrentQuestion(result.next_question);
+      setCurrentTurn(result.current_turn);
+      setMaxTurns(result.max_turns);
+      setResponses([...savedResponses, { ...result.next_question, questionId: result.next_question.index, answer: '', completed: false }]);
+      setPhase('answering');
+    } catch (error) {
+      const accepted = Boolean(responseIdRef.current);
+      setPhase(accepted ? 'advance-error' : 'submit-error');
+      setFlowError(accepted
+        ? 'Your answer is saved. Retry to prepare the next question; your answer will not be submitted again.'
+        : 'Your answer could not be submitted. Your text and recording are retained. Please retry.');
+    } finally {
+      busyRef.current = false;
     }
-
-    // Reset recording buffer for the next question
-    recordedBlobRef.current = null;
-    setRecordingSaved(false);
-    if (playbackUrlRef.current) {
-      URL.revokeObjectURL(playbackUrlRef.current);
-      playbackUrlRef.current = null;
-      setPlaybackUrl('');
-    }
-
-    // Check if this was the final question
-    if (currentIndex >= totalQuestions - 1) {
-      const finalResponses = responses.map((item, index) =>
-        index === currentIndex ? { ...item, completed: Boolean(item.answer.trim()) } : item
-      );
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ currentIndex, responses: finalResponses, secondsLeft }));
-      localStorage.setItem(DURATION_KEY, String(INTERVIEW_SECONDS - secondsLeft));
-      localStorage.setItem(
-        'ai-interview-vision-metrics',
-        JSON.stringify(visionMetricsRef.current || { eyeContact: 75 })
-      );
-
-      // Stop camera tracks before switching routes
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      navigate('/interview-complete');
-      return;
-    }
-
-    // Move to next question
-    setCurrentIndex((index) => index + 1);
   };
 
   // -------------------------------------------------------------
@@ -425,6 +406,13 @@ export default function Interview() {
         </p>
       </div>
     );
+  }
+
+  if (!currentQuestion) {
+    return <section className="card mx-auto max-w-xl p-6">
+      <p role="alert" className="text-slate-700">{flowError}</p>
+      <button className="primary-btn mt-4" onClick={() => setStartAttempt((value) => value + 1)}>Retry Start</button>
+    </section>;
   }
 
   // -------------------------------------------------------------
@@ -447,7 +435,7 @@ export default function Interview() {
               )}
             </div>
             <h1 className="mt-1 text-2xl font-bold text-slate-900">
-              Question {currentIndex + 1} of {totalQuestions}
+              Question {currentTurn} of {maxTurns}
             </h1>
           </div>
           <div className="flex items-center gap-3 rounded-xl bg-navy-50 px-4 py-3 text-navy-900">
@@ -458,26 +446,13 @@ export default function Interview() {
             </div>
           </div>
         </div>
-        <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div role="progressbar" aria-label="Interview progress" aria-valuemin={0} aria-valuemax={maxTurns} aria-valuenow={currentTurn} className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100">
           <div
             className="h-full rounded-full bg-tealish-500 transition-all duration-300"
             style={{ width: `${progress}%` }}
           />
         </div>
 
-        {/* Offline notice if backend could not be reached */}
-        {!isLiveBackend && (
-          <div className="mt-4 flex items-center gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-            <p>
-              <strong>Offline Mode:</strong> Backend server at{' '}
-              <code className="rounded bg-amber-100 px-1 py-0.5 font-mono">http://localhost:8000</code> is
-              unreachable. Questions were generated locally using your Job Description keywords. Run{' '}
-              <code className="rounded bg-amber-100 px-1 py-0.5 font-mono">python backend/main.py</code> to
-              enable live Gemini RAG evaluation.
-            </p>
-          </div>
-        )}
       </section>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_340px]">
@@ -486,10 +461,14 @@ export default function Interview() {
           <article className="card p-5 sm:p-6">
             <div className="flex items-start gap-4">
               <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-navy-50 text-sm font-bold text-navy-800">
-                {currentIndex + 1}
+                {currentTurn}
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Current Question</p>
+                <div className="mt-2 flex gap-2 text-xs font-semibold">
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">{currentQuestion.difficulty?.replace(/^./, (c) => c.toUpperCase())}</span>
+                  {currentQuestion.is_follow_up && <span className="rounded-full bg-teal-50 px-3 py-1 text-teal-700">AI Follow-up</span>}
+                </div>
                 <h2 className="mt-2 text-xl font-bold leading-8 text-slate-900 sm:text-2xl">
                   {currentQuestionText}
                 </h2>
@@ -527,7 +506,7 @@ export default function Interview() {
               {!recording ? (
                 <button
                   onClick={startRecording}
-                  disabled={!cameraReady || !microphoneReady}
+                  disabled={!cameraReady || !microphoneReady || answerLocked}
                   className="primary-btn"
                 >
                   <Video className="h-4 w-4" /> Start Answer Recording
@@ -575,48 +554,26 @@ export default function Interview() {
               <span className="text-xs font-medium text-slate-400">{currentResponse.answer.length} chars</span>
             </div>
             <textarea
+              aria-label="Your answer"
+              disabled={answerLocked}
               rows="6"
               value={currentResponse.answer}
               onChange={(e) => updateAnswer(e.target.value)}
               className="input-field mt-5 resize-y leading-6"
               placeholder="Explain your approach, technical concepts, architecture, and relevant trade-offs here..."
             />
-            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <button
-                onClick={goPrevious}
-                disabled={currentIndex === 0 || submittingAnswer}
-                className="secondary-btn"
-              >
-                <ArrowLeft className="h-4 w-4" /> Previous
+            {flowError && <p role="alert" className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">{flowError}</p>}
+            {currentResponse.completed && <p className="mt-3 text-sm text-slate-500">Answer submitted. This response is now read-only.</p>}
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <p role="status" className="text-sm text-slate-600">
+                {phase === 'recording' ? 'Finishing your recording…' : phase === 'submitting' ? 'Analyzing your response…' : phase === 'advancing' ? 'Preparing the next question…' : ''}
+              </p>
+              <button onClick={goNext} disabled={busy || (!currentResponse.completed && !currentResponse.answer.trim())} className="primary-btn">
+                {busy ? <><Loader2 className="h-4 w-4 animate-spin" /> Please wait</>
+                  : phase === 'advance-error' ? 'Retry Next Question'
+                  : phase === 'submit-error' ? 'Retry Submission'
+                  : <>Submit Answer <ArrowRight className="h-4 w-4" /></>}
               </button>
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <button
-                  onClick={saveCurrentResponse}
-                  disabled={submittingAnswer}
-                  className="secondary-btn"
-                >
-                  <Save className="h-4 w-4" /> Save Draft
-                </button>
-                <button
-                  onClick={goNext}
-                  disabled={submittingAnswer}
-                  className="primary-btn"
-                >
-                  {submittingAnswer ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" /> Saving...
-                    </>
-                  ) : currentIndex === totalQuestions - 1 ? (
-                    <>
-                      Finish Interview <ArrowRight className="h-4 w-4" />
-                    </>
-                  ) : (
-                    <>
-                      Next Question <ArrowRight className="h-4 w-4" />
-                    </>
-                  )}
-                </button>
-              </div>
             </div>
           </article>
         </section>
