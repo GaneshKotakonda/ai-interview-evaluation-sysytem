@@ -51,7 +51,7 @@ export default function Login() {
         <div className="max-w-xl">
           <p className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">Candidate Practice Workspace</p>
           <h1 className="text-5xl font-bold leading-tight">Practice interviews with a focused, measurable workflow.</h1>
-          <p className="mt-6 max-w-lg text-lg leading-8 text-slate-300">Complete a mock interview, capture responses, and review a transparent demonstration report designed for future AI integration.</p>
+          <p className="mt-6 max-w-lg text-lg leading-8 text-slate-300">Complete a practice interview, capture responses, and review an explainable saved evaluation report.</p>
         </div>
         <p className="text-sm text-slate-400">Camera and microphone data remain in your browser during this prototype.</p>
       </section>

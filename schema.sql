@@ -120,7 +120,9 @@ CREATE TABLE IF NOT EXISTS evaluation_reports (
     interview_id UUID UNIQUE REFERENCES interviews(id) ON DELETE CASCADE,
     answer_quality_score INT,
     communication_score INT,
+    -- Retained only for compatibility with reports created before finalization.
     voice_confidence_score INT,
+    speech_fluency_score INT,
     camera_engagement_score INT,
     overall_score INT,
     vision_metrics JSONB,
@@ -130,6 +132,9 @@ CREATE TABLE IF NOT EXISTS evaluation_reports (
     summary_feedback TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE evaluation_reports
+    ADD COLUMN IF NOT EXISTS speech_fluency_score INT;
 
 -- 6. Cosine Similarity Function for Vector Embeddings
 CREATE OR REPLACE FUNCTION cosine_similarity(a FLOAT8[], b FLOAT8[])
@@ -180,3 +185,6 @@ CREATE TABLE IF NOT EXISTS arena_turns (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);
+CREATE INDEX IF NOT EXISTS interviews_user_created_idx ON interviews(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS interview_questions_interview_idx ON interview_questions(interview_id);
+CREATE INDEX IF NOT EXISTS interview_responses_interview_idx ON interview_responses(interview_id);

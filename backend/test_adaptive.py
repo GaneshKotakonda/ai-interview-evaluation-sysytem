@@ -99,7 +99,7 @@ class AdaptiveTests(unittest.TestCase):
                 super().execute(query, params)
                 if "INSERT INTO evaluation_reports" in query:
                     fields = ("interview_id", "answer_quality_score", "communication_score",
-                              "voice_confidence_score", "camera_engagement_score", "overall_score",
+                              "voice_confidence_score", "speech_fluency_score", "camera_engagement_score", "overall_score",
                               "vision_metrics", "nlp_metrics", "strengths", "improvements", "summary_feedback")
                     self.saved_report = dict(zip(fields, params))
                     self.saved_report["nlp_metrics"] = json.loads(self.saved_report["nlp_metrics"])

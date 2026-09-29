@@ -107,7 +107,7 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-tealish-600" />
           <div>
-            <p className="text-sm font-semibold text-slate-800">Behaviour Analysis</p>
+            <p className="text-sm font-semibold text-slate-800">Camera Engagement</p>
             <p className="text-xs text-slate-500">{status}</p>
           </div>
         </div>
@@ -117,8 +117,8 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
       {metrics && (
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <Metric icon={ScanFace} label="Face presence" value={`${metrics.facePresence}%`} />
-          <Metric icon={Eye} label="Eye contact" value={`${metrics.eyeContact}%`} />
-          <Metric icon={Activity} label="Camera facing" value={`${metrics.cameraFacing}%`} />
+          <Metric icon={Eye} label="Approximate screen gaze" value={`${metrics.eyeContact}%`} />
+          <Metric icon={Activity} label="Head alignment" value={`${metrics.cameraFacing}%`} />
           <Metric icon={Users} label="Faces now" value={metrics.faceCount > 0 ? metrics.faceCount : 'None'} />
         </div>
       )}

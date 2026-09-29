@@ -195,7 +195,7 @@ export default function Readiness() {
                 <div>
                   <h2 className="font-bold text-slate-900">Target Role & Job Description</h2>
                   <p className="text-xs text-slate-500">
-                    Gemini will generate 5 targeted questions directly assessing this role and requirements.
+                    Gemini will generate adaptive questions for this role and its stated requirements.
                   </p>
                 </div>
               </div>
@@ -350,7 +350,7 @@ export default function Readiness() {
                 className="mt-1 h-4 w-4 rounded border-slate-300 text-navy-800 focus:ring-navy-600"
               />
               <span className="text-sm leading-6 text-slate-700">
-                I consent to audio, video, and behavior monitoring for this mock interview.
+                I consent to audio, video, and observable camera-engagement analysis for this practice interview.
               </span>
             </label>
             <button

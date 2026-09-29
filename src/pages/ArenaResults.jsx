@@ -48,7 +48,7 @@ export default function ArenaResults() {
       {[["Strongest Areas", results.strongest_areas], ["Areas to Practice", results.practice_areas]].map(([title, topics]) => <article key={title} className="card p-6">
         <h2 className="text-lg font-bold">{title}</h2>
         <p className="mt-2 text-xs text-slate-500">Based on your average evaluated score for each topic.</p>
-        <ul className="mt-4 space-y-3">{topics.map((item) => <li key={item.topic} className="flex justify-between gap-3 text-sm"><span>{item.topic}</span><span>{item.score} / 100</span></li>)}</ul>
+        {topics.length ? <ul className="mt-4 space-y-3">{topics.map((item) => <li key={item.topic} className="flex justify-between gap-3 text-sm"><span>{item.topic}</span><span>{item.score} / 100</span></li>)}</ul> : <p className="mt-4 text-sm text-slate-500">Not enough data yet.</p>}
       </article>)}
     </section>
     <section className="card p-6">

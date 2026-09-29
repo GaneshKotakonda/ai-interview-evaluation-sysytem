@@ -93,18 +93,19 @@ class EvaluateInterviewRequest(BaseModel):
 
 def completion_response(report):
     """Stable completion contract for initial submission and retry."""
+    speech_fluency = report.get("speech_fluency_score")
+    if speech_fluency is None:
+        speech_fluency = report.get("voice_confidence_score")
     return {
         "interview_id": str(report["interview_id"]),
         "overall_score": report["overall_score"],
         "scores": [
-            {"label": label, "value": report[field]}
-            for label, field in (
-                ("Answer Quality", "answer_quality_score"),
-                ("Communication", "communication_score"),
-                ("Voice Confidence", "voice_confidence_score"),
-                ("Camera Engagement", "camera_engagement_score"),
-            )
+            {"label": "Answer Quality", "value": report["answer_quality_score"]},
+            {"label": "Communication", "value": report["communication_score"]},
+            {"label": "Speech Fluency", "value": speech_fluency},
+            {"label": "Camera Engagement", "value": report["camera_engagement_score"]},
         ],
+        "speech_fluency_score": speech_fluency,
         "strengths": report["strengths"], "improvements": report["improvements"],
         "feedback": report["summary_feedback"], "nlp_metrics": report["nlp_metrics"],
     }
@@ -443,14 +444,14 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
         except (ValueError, TypeError):
             camera_engagement = 75
 
-        voice_confidence = max(50, min(98, 95 - (nlp_filler_summary["total_fillers"] * 2)))
+        speech_fluency = max(50, min(98, 95 - (nlp_filler_summary["total_fillers"] * 2)))
 
-        # Overall weighted score: 40% Answer Quality, 25% Communication, 20% Vision, 15% Voice
+        # Overall weighted score: 40% Answer Quality, 25% Communication, 20% Vision, 15% speech fluency.
         overall_score = round(
             (avg_answer_quality * 0.40) +
             (avg_communication * 0.25) +
             (camera_engagement * 0.20) +
-            (voice_confidence * 0.15)
+            (speech_fluency * 0.15)
         )
 
         # Step D: Generate top unique strengths, improvements, and holistic feedback
@@ -472,16 +473,17 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
                 """
                 INSERT INTO evaluation_reports (
                     interview_id, answer_quality_score, communication_score,
-                    voice_confidence_score, camera_engagement_score, overall_score,
+                    voice_confidence_score, speech_fluency_score, camera_engagement_score, overall_score,
                     vision_metrics, nlp_metrics, strengths, improvements, summary_feedback
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
                 (
                     interview_id,
                     avg_answer_quality,
                     avg_communication,
-                    voice_confidence,
+                    speech_fluency,
+                    speech_fluency,
                     camera_engagement,
                     overall_score,
                     json.dumps(vision_metrics),
@@ -509,7 +511,7 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
             "overall_score": overall_score,
             "answer_quality_score": avg_answer_quality,
             "communication_score": avg_communication,
-            "voice_confidence_score": voice_confidence,
+            "speech_fluency_score": speech_fluency,
             "camera_engagement_score": camera_engagement,
             "strengths": top_strengths, "improvements": top_improvements,
             "summary_feedback": summary_feedback, "nlp_metrics": nlp_filler_summary,

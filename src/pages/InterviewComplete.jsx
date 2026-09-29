@@ -68,7 +68,6 @@ export default function InterviewComplete() {
         // Cache report locally for immediate display in Report.jsx
         localStorage.setItem('latest-evaluation-report', JSON.stringify(report));
       } catch (err) {
-        console.error('[EVALUATION ERROR]', err);
         if (isMounted) {
           setEvaluationError(
             'Your answers are saved, but the final report could not be generated. Please retry.'
@@ -116,7 +115,7 @@ export default function InterviewComplete() {
     },
     {
       label: 'Camera Engagement',
-      state: `Completed · ${eyeContactVal}% eye contact maintained`,
+      state: `Approximate screen gaze: ${eyeContactVal}%`,
       complete: true,
     },
   ];
@@ -139,7 +138,7 @@ export default function InterviewComplete() {
             Interview Completed!
           </h1>
           <p className="mx-auto mt-3 max-w-xl text-slate-500">
-            Your responses, video recordings, and eye contact behavior have been securely saved.
+            Your responses and submitted media have been saved for this interview.
           </p>
 
           <div className="mx-auto mt-8 grid max-w-2xl gap-3 sm:grid-cols-3">

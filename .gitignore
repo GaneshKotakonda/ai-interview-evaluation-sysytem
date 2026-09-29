@@ -1,6 +1,7 @@
 # Node dependencies and build output
 node_modules
 dist
+.env.local
 .DS_Store
 *.local
 
@@ -19,3 +20,19 @@ __pycache__/
 backend/uploads/
 uploads/
 *.webm
+
+# Local service output
+firebase-debug.log
+*-server.out.log
+*-server.err.log
+backend/server.out.log
+backend/server.err.log
+
+# Local Test Suites & Reports
+backend/test_nlp_evaluator.py
+test_selenium_login.py
+build_testing_report_pdf.py
+report_template.html
+*.pdf
+*.png
+

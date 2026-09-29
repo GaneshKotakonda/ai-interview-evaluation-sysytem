@@ -91,3 +91,34 @@ def retrieve_top_rubric_matches(conn, interview_id: str, question_index: int, ca
     highest_similarity = max(float(row["similarity"]) for row in rows)
 
     return rubric_points, highest_similarity
+
+
+# -------------------------------------------------------------
+# BLOCK 4: Candidate Transcript Evaluation & Quality Scoring
+# -------------------------------------------------------------
+def evaluate_candidate_transcript(candidate_roll_no: str, transcript: str, similarity_score: float) -> dict:
+    """
+    Evaluates candidate transcript, verifies input integrity, counts filler words,
+    and computes voice confidence and answer quality scores.
+    """
+    if not candidate_roll_no or not candidate_roll_no.strip():
+        raise ValueError("Candidate roll number cannot be empty")
+    if not transcript or not transcript.strip():
+        raise ValueError("Candidate transcript cannot be empty")
+    if similarity_score < 0.0 or similarity_score > 1.0:
+        raise ValueError("Similarity score must be between 0.0 and 1.0")
+
+    filler_stats = count_filler_words(transcript)
+    total_fillers = filler_stats["total_count"]
+    # Baseline voice confidence 95 minus 2 points per filler word, clamped to [40, 100]
+    voice_confidence = max(40, min(100, 95 - (total_fillers * 2)))
+    answer_quality = round(similarity_score * 100)
+
+    return {
+        "candidate_roll_no": candidate_roll_no.strip(),
+        "total_fillers": total_fillers,
+        "filler_breakdown": filler_stats["breakdown"],
+        "voice_confidence_score": voice_confidence,
+        "answer_quality_score": answer_quality,
+    }
+

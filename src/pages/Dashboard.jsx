@@ -41,7 +41,8 @@ function formatDuration(seconds) {
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const firstName = (user?.displayName || 'Candidate').split(' ')[0];
+  const rawParts = (user?.displayName || 'Candidate').split(' ');
+  const firstName = (rawParts[0].length === 1 && rawParts.length > 1) ? rawParts[1] : rawParts[0];
   const [interviews, setInterviews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
@@ -60,8 +61,7 @@ export default function Dashboard() {
         setHistoryError('');
         const history = await api.getUserInterviews(user.uid);
         if (isMounted) setInterviews(Array.isArray(history) ? history : []);
-      } catch (error) {
-        console.error('[DASHBOARD HISTORY ERROR]', error);
+      } catch {
         if (isMounted) {
           setInterviews([]);
           setHistoryError('We could not load your interview history. Please try again shortly.');
