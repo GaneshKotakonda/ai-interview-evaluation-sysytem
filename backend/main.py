@@ -3,6 +3,10 @@
 Run from the repository root:
     python -m uvicorn main:app --app-dir backend --reload --port 8000
 
+Every endpoint except /health requires ``Authorization: Bearer <Firebase ID
+token>`` (see auth.py). Interview endpoints only act on interviews owned by
+the signed-in user; /users/{firebase_uid} paths must name that user.
+
 Endpoints (all under /api):
     POST /interviews/start                  create a session + first question
     POST /interviews/{id}/submit-answer     save, embed and grade one answer
@@ -12,23 +16,29 @@ Endpoints (all under /api):
     GET  /interviews/{id}/report            saved Standard report + turns
     GET  /interviews/{id}/arena-results     saved Arena summary
     GET  /interviews/user/{firebase_uid}    a user's interview history
+    DELETE /interviews/{id}                 owner deletes one interview
+    GET  /users/{firebase_uid}/profile      profile + practice statistics
+    PUT  /users/{firebase_uid}/profile      create/update name and email
+    GET  /users/{firebase_uid}/reports      saved Standard reports + scores
     GET  /health                            liveness + database check
 """
 import json
 import logging
 import os
+import shutil
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from typing import Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import config  # loads backend/.env before the modules below read settings
 import adaptive_service
 import arena
+import auth
+from auth import AuthUser
 import database
 import gemini_service
 import scoring
@@ -70,17 +80,17 @@ app.add_middleware(
 # -------------------------------------------------------------
 # BLOCK 2: Answer-video storage
 # -------------------------------------------------------------
-# Videos are written to backend/uploads/<interview_id>/q_<n>.webm and served
-# at /uploads/... . NOTE: these URLs are public to anyone who knows them.
+# Videos are written to backend/uploads/<interview_id>/q_<n>.webm. They are
+# deliberately NOT served over HTTP: a public static mount would expose every
+# candidate's recording to anyone who could guess the URL.
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def save_answer_video(interview_id: str, question_index: int, video: UploadFile) -> str:
-    """Stream an uploaded answer video to disk and return its public URL.
+    """Stream an uploaded answer video to disk and return its storage path.
 
     Rejects files larger than MAX_UPLOAD_MB with HTTP 413 and removes the
     partial file. The canonical UUID is used for both the folder and the URL
@@ -139,13 +149,35 @@ def transaction(error_detail: str):
 
 
 # -------------------------------------------------------------
+# BLOCK 3b: Ownership check
+# -------------------------------------------------------------
+def authorize_interview(cur, interview, user: AuthUser):
+    """404 unless ``interview`` belongs to the signed-in user.
+
+    404 rather than 403 so a caller cannot probe which interview ids exist.
+    """
+    cur.execute("SELECT firebase_uid FROM users WHERE id = %s;", (interview.get("user_id"),))
+    owner = cur.fetchone()
+    if not owner or owner["firebase_uid"] != user.uid:
+        raise HTTPException(status_code=404, detail="Interview not found.")
+
+
+def owned_interview(cur, interview_id: str, user: AuthUser, lock=True):
+    """Load an interview (row-locked by default) and require ownership."""
+    interview = adaptive_service.fetch_interview(cur, interview_id, lock=lock)
+    authorize_interview(cur, interview, user)
+    return interview
+
+
+# -------------------------------------------------------------
 # BLOCK 4: Request models (validated by Pydantic)
 # -------------------------------------------------------------
 class StartInterviewRequest(BaseModel):
+    # Identity comes from the verified token; firebase_uid/user_id are
+    # accepted for older frontend builds but ignored.
     firebase_uid: Optional[str] = None
     email: Optional[str] = None
     full_name: Optional[str] = None
-    # Kept as a compatibility alias for older frontend builds.
     user_id: Optional[str] = None
     role_title: str = Field(default="Software Engineer", max_length=100)
     job_description: Optional[str] = None
@@ -206,20 +238,18 @@ def completion_response(report):
 # -------------------------------------------------------------
 # BLOCK 6: POST /api/interviews/start
 # -------------------------------------------------------------
-# 1. Resolve (or create) the internal user for the Firebase UID.
+# 1. Resolve (or create) the internal user for the token's Firebase UID.
 # 2. Insert the interview row with role, optional job description and mode.
 # 3. Generate ONLY the first (medium) question and store its private rubric
 #    and rubric embeddings; later questions depend on the candidate's answers.
 # 4. Arena sessions also get their arena_stats row.
 @app.post("/api/interviews/start")
-def start_interview(payload: StartInterviewRequest):
-    firebase_uid = (payload.firebase_uid or payload.user_id or "").strip()
-    if not firebase_uid:
-        raise HTTPException(status_code=400, detail="firebase_uid is required.")
-
+def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(auth.current_user)):
+    firebase_uid = user.uid
     max_turns = 6 if payload.interview_mode == "game" else payload.max_turns
-    email = _clean(payload.email)
-    full_name = _clean(payload.full_name)
+    # The token's email is verified by Firebase; prefer it over the body.
+    email = _clean(user.email) or _clean(payload.email)
+    full_name = _clean(payload.full_name) or _clean(user.name)
     role_title = _clean(payload.role_title) or "Software Engineer"
 
     with transaction("Could not start the interview. Please retry.") as (_conn, cur):
@@ -301,10 +331,11 @@ def submit_answer(
     question_index: int = Form(...),
     question_text: str = Form(""),
     candidate_answer: str = Form(""),
-    video: Optional[UploadFile] = File(None)
+    video: Optional[UploadFile] = File(None),
+    user: AuthUser = Depends(auth.current_user),
 ):
     with transaction("Could not save and evaluate this answer. Please retry.") as (conn, cur):
-        interview = adaptive_service.lock_interview(cur, interview_id)
+        interview = owned_interview(cur, interview_id, user)
         adaptive_service.require_active(interview)
 
         # Step A: Check for a previously accepted submission BEFORE checking
@@ -337,9 +368,13 @@ def submit_answer(
 # BLOCK 8: POST /api/interviews/{id}/next-question
 # -------------------------------------------------------------
 @app.post("/api/interviews/{interview_id}/next-question")
-def next_question(interview_id: str, payload: Optional[NextQuestionRequest] = None):
+def next_question(
+    interview_id: str,
+    payload: Optional[NextQuestionRequest] = None,
+    user: AuthUser = Depends(auth.current_user),
+):
     with transaction("Could not advance the interview. Please retry.") as (_conn, cur):
-        interview = adaptive_service.lock_interview(cur, interview_id)
+        interview = owned_interview(cur, interview_id, user)
         return adaptive_service.advance(cur, interview, payload.response_id if payload else None)
 
 
@@ -347,17 +382,17 @@ def next_question(interview_id: str, payload: Optional[NextQuestionRequest] = No
 # BLOCK 9: Arena endpoints
 # -------------------------------------------------------------
 @app.post("/api/interviews/{interview_id}/hint")
-def arena_hint(interview_id: str, payload: HintRequest):
+def arena_hint(interview_id: str, payload: HintRequest, user: AuthUser = Depends(auth.current_user)):
     with transaction("Could not request a hint. Please retry.") as (_conn, cur):
-        interview = adaptive_service.lock_interview(cur, interview_id)
+        interview = owned_interview(cur, interview_id, user)
         return arena.use_hint(cur, interview, payload.current_turn)
 
 
 @app.get("/api/interviews/{interview_id}/arena-results")
-def arena_results(interview_id: str):
+def arena_results(interview_id: str, user: AuthUser = Depends(auth.current_user)):
     # Read-only: no row lock, so viewing results never blocks an active turn.
     with transaction("Could not load Arena results. Please retry.") as (_conn, cur):
-        interview = adaptive_service.fetch_interview(cur, interview_id, lock=False)
+        interview = owned_interview(cur, interview_id, user, lock=False)
         return arena.results(cur, interview)
 
 
@@ -395,10 +430,14 @@ def _legacy_evaluation_items(cur, interview_id, responses):
 
 
 @app.post("/api/interviews/{interview_id}/complete")
-def complete_and_evaluate_interview(interview_id: str, payload: EvaluateInterviewRequest):
+def complete_and_evaluate_interview(
+    interview_id: str,
+    payload: EvaluateInterviewRequest,
+    user: AuthUser = Depends(auth.current_user),
+):
     with transaction("Could not complete this interview. Please retry.") as (_conn, cur):
         # Step A: Lock and validate the session; replay a saved report.
-        interview = adaptive_service.lock_interview(cur, interview_id)
+        interview = owned_interview(cur, interview_id, user)
         if interview.get("interview_mode") == "game":
             raise HTTPException(409, "Arena completes through next-question; use arena-results for its summary.")
         if interview["status"] in ("completed", "evaluated"):
@@ -515,9 +554,9 @@ def complete_and_evaluate_interview(interview_id: str, payload: EvaluateIntervie
 # BLOCK 11: GET /api/interviews/{id}/report  (Report page)
 # -------------------------------------------------------------
 @app.get("/api/interviews/{interview_id}/report")
-def get_interview_report(interview_id: str):
+def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.current_user)):
     with transaction("Could not load this report. Please retry.") as (_conn, cur):
-        interview = adaptive_service.fetch_interview(cur, interview_id, lock=False)
+        interview = owned_interview(cur, interview_id, user, lock=False)
         cur.execute("SELECT * FROM evaluation_reports WHERE interview_id = %s;", (interview_id,))
         report = cur.fetchone()
         if not report:
@@ -542,7 +581,8 @@ def get_interview_report(interview_id: str):
 # BLOCK 12: GET /api/interviews/user/{firebase_uid}  (Dashboard)
 # -------------------------------------------------------------
 @app.get("/api/interviews/user/{firebase_uid}")
-def get_user_interviews(firebase_uid: str):
+def get_user_interviews(firebase_uid: str, user: AuthUser = Depends(auth.current_user)):
+    auth.require_self(firebase_uid, user)
     with transaction("Could not load interview history. Please retry.") as (_conn, cur):
         cur.execute("SELECT id FROM users WHERE firebase_uid = %s;", (firebase_uid,))
         user_row = cur.fetchone()
@@ -561,7 +601,137 @@ def get_user_interviews(firebase_uid: str):
 
 
 # -------------------------------------------------------------
-# BLOCK 13: GET /api/health
+# BLOCK 13: DELETE /api/interviews/{id}  (My Interviews)
+# -------------------------------------------------------------
+# Only the owner may delete. Child rows (questions, responses, rubrics,
+# reports, Arena state) are removed by ON DELETE CASCADE; saved answer
+# videos are removed from disk after the transaction commits.
+@app.delete("/api/interviews/{interview_id}")
+def delete_interview(interview_id: str, user: AuthUser = Depends(auth.current_user)):
+    with transaction("Could not delete this interview. Please retry.") as (_conn, cur):
+        owned_interview(cur, interview_id, user)
+        cur.execute("DELETE FROM interviews WHERE id = %s;", (interview_id,))
+
+    canonical_id = str(uuid.UUID(interview_id))
+    shutil.rmtree(os.path.join(UPLOAD_DIR, canonical_id), ignore_errors=True)
+    return {"status": "deleted", "interview_id": canonical_id}
+
+
+# -------------------------------------------------------------
+# BLOCK 14: Profile  (Profile page)
+# -------------------------------------------------------------
+class ProfileUpdateRequest(BaseModel):
+    email: Optional[str] = Field(default=None, max_length=255)
+    full_name: Optional[str] = Field(default=None, max_length=255)
+
+
+def _profile_stats(cur, user_id):
+    """Aggregate practice statistics for one internal user id."""
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS total_interviews,
+            COUNT(*) FILTER (WHERE status IN ('completed', 'evaluated')) AS completed_interviews,
+            COUNT(*) FILTER (WHERE interview_mode = 'standard') AS standard_interviews,
+            COUNT(*) FILTER (WHERE interview_mode = 'game') AS arena_sessions,
+            ROUND(AVG(overall_score) FILTER (WHERE status IN ('completed', 'evaluated')))::INT AS average_score,
+            MAX(overall_score) FILTER (WHERE status IN ('completed', 'evaluated')) AS best_score,
+            COALESCE(SUM(duration_seconds), 0)::INT AS total_practice_seconds,
+            MAX(created_at) AS last_interview_at
+        FROM interviews
+        WHERE user_id = %s;
+        """,
+        (user_id,)
+    )
+    return cur.fetchone()
+
+
+def _profile_response(firebase_uid, user_row, stats):
+    return {
+        "firebase_uid": firebase_uid,
+        "exists": user_row is not None,
+        "email": user_row["email"] if user_row else None,
+        "full_name": user_row["full_name"] if user_row else None,
+        "created_at": user_row["created_at"] if user_row else None,
+        "stats": stats or {
+            "total_interviews": 0, "completed_interviews": 0,
+            "standard_interviews": 0, "arena_sessions": 0,
+            "average_score": None, "best_score": None,
+            "total_practice_seconds": 0, "last_interview_at": None,
+        },
+    }
+
+
+@app.get("/api/users/{firebase_uid}/profile")
+def get_profile(firebase_uid: str, user: AuthUser = Depends(auth.current_user)):
+    auth.require_self(firebase_uid, user)
+    with transaction("Could not load your profile. Please retry.") as (_conn, cur):
+        cur.execute(
+            "SELECT id, email, full_name, created_at FROM users WHERE firebase_uid = %s;",
+            (firebase_uid,)
+        )
+        user_row = cur.fetchone()
+        stats = _profile_stats(cur, str(user_row["id"])) if user_row else None
+    return _profile_response(firebase_uid, user_row, stats)
+
+
+@app.put("/api/users/{firebase_uid}/profile")
+def update_profile(
+    firebase_uid: str,
+    payload: ProfileUpdateRequest,
+    user: AuthUser = Depends(auth.current_user),
+):
+    """Create or update the user's profile metadata (name/email from Firebase)."""
+    auth.require_self(firebase_uid, user)
+    with transaction("Could not save your profile. Please retry.") as (_conn, cur):
+        cur.execute(
+            """
+            INSERT INTO users (firebase_uid, email, full_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (firebase_uid) DO UPDATE
+            SET email = COALESCE(EXCLUDED.email, users.email),
+                full_name = COALESCE(EXCLUDED.full_name, users.full_name)
+            RETURNING id, email, full_name, created_at;
+            """,
+            (firebase_uid, _clean(payload.email), _clean(payload.full_name))
+        )
+        user_row = cur.fetchone()
+        stats = _profile_stats(cur, str(user_row["id"]))
+    return _profile_response(firebase_uid, user_row, stats)
+
+
+# -------------------------------------------------------------
+# BLOCK 15: GET /api/users/{firebase_uid}/reports  (Reports page)
+# -------------------------------------------------------------
+# Every saved Standard evaluation with its component scores, newest first.
+@app.get("/api/users/{firebase_uid}/reports")
+def get_user_reports(firebase_uid: str, user: AuthUser = Depends(auth.current_user)):
+    auth.require_self(firebase_uid, user)
+    with transaction("Could not load your reports. Please retry.") as (_conn, cur):
+        cur.execute("SELECT id FROM users WHERE firebase_uid = %s;", (firebase_uid,))
+        user_row = cur.fetchone()
+        if not user_row:
+            return []
+        cur.execute(
+            """
+            SELECT i.id AS interview_id, i.role_title, i.duration_seconds,
+                   i.created_at, i.completed_at,
+                   r.overall_score, r.answer_quality_score, r.communication_score,
+                   COALESCE(r.speech_fluency_score, r.voice_confidence_score) AS speech_fluency_score,
+                   r.camera_engagement_score, r.strengths, r.improvements,
+                   r.created_at AS evaluated_at
+            FROM evaluation_reports r
+            JOIN interviews i ON i.id = r.interview_id
+            WHERE i.user_id = %s
+            ORDER BY r.created_at DESC;
+            """,
+            (str(user_row["id"]),)
+        )
+        return cur.fetchall()
+
+
+# -------------------------------------------------------------
+# BLOCK 16: GET /api/health
 # -------------------------------------------------------------
 @app.get("/api/health")
 def health():

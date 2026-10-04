@@ -12,13 +12,17 @@ import Report from './pages/Report';
 import Arena from './pages/Arena';
 import ArenaPlay from './pages/ArenaPlay';
 import ArenaResults from './pages/ArenaResults';
+import MyInterviews from './pages/MyInterviews';
+import Reports from './pages/Reports';
+import Profile from './pages/Profile';
 
 // -------------------------------------------------------------
 // Route table.
 // Public: /login, /signup, /forgot-password.
 // Protected (signed-in users, inside the sidebar layout): dashboard,
 // Standard interview flow (readiness → interview → complete → report) and
-// Arena flow (setup → play → results). Unknown paths go to the dashboard.
+// Arena flow (setup → play → results), My Interviews, Reports and Profile.
+// Unknown paths go to the dashboard.
 // -------------------------------------------------------------
 
 export default function App() {
@@ -38,6 +42,9 @@ export default function App() {
           <Route path="/arena/results" element={<ArenaResults />} />
           <Route path="/arena/play" element={<ArenaPlay />} />
           <Route path="/report" element={<Report />} />
+          <Route path="/interviews" element={<MyInterviews />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/profile" element={<Profile />} />
         </Route>
       </Route>
 

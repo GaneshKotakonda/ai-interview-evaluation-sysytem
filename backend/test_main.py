@@ -9,6 +9,9 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 import main
+from auth import AuthUser
+
+TEST_USER = AuthUser(uid="firebase-user-abc123")
 
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
@@ -101,7 +104,7 @@ class InterviewApiTests(unittest.TestCase):
                 "rubric_points": ["Contracts"],
             }
         ), patch.object(main.gemini_service, "get_embedding", return_value=[]):
-            result = main.start_interview(payload)
+            result = main.start_interview(payload, user=TEST_USER)
 
         user_insert = next(call for call in cursor.calls if "INSERT INTO users" in call[0])
         interview_insert = next(call for call in cursor.calls if "INSERT INTO interviews" in call[0])
@@ -131,7 +134,7 @@ class InterviewApiTests(unittest.TestCase):
         connection = FakeConnection(cursor)
 
         with patch.object(main.database, "get_db_connection", return_value=connection):
-            result = main.get_user_interviews(FIREBASE_UID)
+            result = main.get_user_interviews(FIREBASE_UID, user=TEST_USER)
 
         self.assertEqual(result, history)
         history_query = next(
@@ -144,7 +147,8 @@ class InterviewApiTests(unittest.TestCase):
         connection = FakeConnection(cursor)
 
         with patch.object(main.database, "get_db_connection", return_value=connection):
-            result = main.get_user_interviews("unknown-firebase-user")
+            result = main.get_user_interviews(
+                "unknown-firebase-user", user=AuthUser(uid="unknown-firebase-user"))
 
         self.assertEqual(result, [])
         self.assertFalse(any("FROM interviews" in query for query, _ in cursor.calls))
@@ -182,7 +186,7 @@ class InterviewApiTests(unittest.TestCase):
         with patch.object(main.database, "get_db_connection", return_value=connection), patch.object(
             main.gemini_service, "batch_evaluate_interview", return_value=evaluation
         ):
-            result = main.complete_and_evaluate_interview(INTERVIEW_ID, payload)
+            result = main.complete_and_evaluate_interview(INTERVIEW_ID, payload, user=TEST_USER)
 
         update_call = next(call for call in cursor.calls if "UPDATE interviews" in call[0])
         self.assertIn("status = 'completed'", update_call[0])

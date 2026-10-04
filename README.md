@@ -98,6 +98,8 @@ EMBEDDING_DIMENSIONS=768
 GEMINI_TIMEOUT_SECONDS=60
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 MAX_UPLOAD_MB=200
+# Firebase project whose sign-in tokens the API accepts (match VITE_FIREBASE_PROJECT_ID)
+FIREBASE_PROJECT_ID=ai-evaluation-40c8a
 ```
 
 ## Database
@@ -123,7 +125,7 @@ Follow-up controls prevent more than one consecutive follow-up. Arena XP, streak
 - Camera engagement, face presence, approximate gaze direction, and head alignment are observable approximations. They do not measure confidence, honesty, personality, emotion, or employability.
 - Speech Fluency currently uses transcript/filler-word signals (averaged per answer) rather than full acoustic modelling.
 - When the camera model produces no data, Camera Engagement is omitted and the overall score is re-weighted over the other components; no value is assumed.
-- The API does not yet verify Firebase ID tokens, and uploaded answer videos are served from public URLs. Add authentication before any real deployment.
+- Every API call except `/api/health` must carry the signed-in user's Firebase ID token (`Authorization: Bearer …`); the backend verifies it against Google's signing certificates and only lets users read or change their own interviews and account. Uploaded answer videos are stored on the server's disk and are not served over HTTP.
 - Active interview refresh recovery is limited; completed Arena results can be reloaded from persisted state.
 - The system supports coaching and self-practice, not hiring decisions.
 
@@ -137,6 +139,7 @@ Potential extensions include automatic speech-to-text, deeper acoustic analysis,
 backend/
   main.py              API endpoints and transaction handling
   config.py            environment settings (loaded once)
+  auth.py              Firebase ID-token verification
   adaptive.py          deterministic difficulty and follow-up policy
   adaptive_service.py  adaptive state and persistence
   adaptive_questions.py question validation and offline fallback questions

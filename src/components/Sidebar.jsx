@@ -17,9 +17,9 @@ const items = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', enabled: true },
   { label: 'Start Interview', icon: Mic, to: '/readiness', enabled: true },
   { label: 'Interview Arena', icon: Gamepad2, to: '/arena', enabled: true },
-  { label: 'My Interviews', icon: BarChart3, enabled: false },
-  { label: 'Reports', icon: FileText, enabled: false },
-  { label: 'Profile', icon: UserRound, enabled: false },
+  { label: 'My Interviews', icon: BarChart3, to: '/interviews', enabled: true },
+  { label: 'Reports', icon: FileText, to: '/reports', enabled: true },
+  { label: 'Profile', icon: UserRound, to: '/profile', enabled: true },
 ];
 
 export default function Sidebar({ mobileOpen, onClose }) {
@@ -102,7 +102,7 @@ export default function Sidebar({ mobileOpen, onClose }) {
         </nav>
 
         <div className="border-t border-slate-100 p-4">
-          <div className="mb-3 flex items-center gap-3 rounded-xl bg-slate-50 p-3">
+          <NavLink to="/profile" onClick={onClose} className="mb-3 flex items-center gap-3 rounded-xl bg-slate-50 p-3 transition hover:bg-slate-100">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-navy-900 text-sm font-bold text-white">
               {initial}
             </div>
@@ -110,7 +110,7 @@ export default function Sidebar({ mobileOpen, onClose }) {
               <p className="truncate text-sm font-semibold text-slate-900">{displayName}</p>
               <p className="truncate text-xs text-slate-500">{user?.email}</p>
             </div>
-          </div>
+          </NavLink>
           <button onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-rose-50 hover:text-rose-700">
             <LogOut className="h-4 w-4" />
             Logout

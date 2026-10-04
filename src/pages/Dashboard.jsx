@@ -17,37 +17,12 @@ import StatCard from '../components/StatCard';
 import ProgressBar from '../components/ProgressBar';
 import { api } from '../services/api';
 import { clearInterviewProgress } from '../utils/interviewJourney';
+import { formatDate, formatDuration, isCompleted, resultLink } from '../utils/interviewFormat';
 
 // -------------------------------------------------------------
 // BLOCK 1: Helpers
 // -------------------------------------------------------------
 const statIcons = [ListChecks, Gauge, Award, CheckCircle2];
-
-// Where a history row's "View" link points: Arena sessions have their own
-// results page; Standard interviews open the saved report.
-function resultLink(interview) {
-  const id = encodeURIComponent(interview.id);
-  return interview.interview_mode === 'game' ? `/arena/results?id=${id}` : `/report?id=${id}`;
-}
-
-function isCompleted(interview) {
-  return interview.status === 'completed' || interview.status === 'evaluated';
-}
-
-function formatDate(value) {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date);
-}
-
-function formatDuration(seconds) {
-  const duration = Number(seconds);
-  if (!Number.isFinite(duration) || duration <= 0) return '—';
-  const minutes = Math.floor(duration / 60);
-  const remainder = duration % 60;
-  return `${minutes}m ${remainder}s`;
-}
 
 // -------------------------------------------------------------
 // BLOCK 2: Page — stats, mode cards and recent history
@@ -225,9 +200,14 @@ export default function Dashboard() {
       </section>
 
       <section className="card overflow-hidden">
-        <div className="border-b border-slate-100 px-6 py-5">
-          <h2 className="text-lg font-bold text-slate-900">Recent Interviews</h2>
-          <p className="mt-1 text-sm text-slate-500">Your latest completed interview evaluations.</p>
+        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-6 py-5">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900">Recent Interviews</h2>
+            <p className="mt-1 text-sm text-slate-500">Your latest completed interview evaluations.</p>
+          </div>
+          {completedInterviews.length > 0 && (
+            <Link to="/interviews" className="text-sm font-semibold text-navy-700 hover:text-navy-900">View all</Link>
+          )}
         </div>
 
         {loading ? (

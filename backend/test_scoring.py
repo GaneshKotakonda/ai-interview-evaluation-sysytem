@@ -13,6 +13,9 @@ import adaptive_service
 import config
 import gemini_service
 import main
+from auth import AuthUser
+
+TEST_USER = AuthUser(uid="firebase-user-abc123")
 import nlp_evaluator
 import scoring
 from adaptive_questions import fallback_question
@@ -59,7 +62,7 @@ class EndpointFixTests(unittest.TestCase):
                       "overall_summary": ""}
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)), \
              patch.object(main.gemini_service, "batch_evaluate_interview", return_value=evaluation):
-            result = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest())
+            result = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=TEST_USER)
         self.assertNotIn("Camera Engagement", [s["label"] for s in result["scores"]])
         self.assertIsNone(result["camera_engagement_score"])
         self.assertIn("not measured", result["feedback"])
@@ -71,7 +74,7 @@ class EndpointFixTests(unittest.TestCase):
         with patch.object(main.database, "get_db_connection", return_value=conn), \
              patch.object(main.adaptive_service, "advance", side_effect=RuntimeError("secret detail")):
             with self.assertRaises(HTTPException) as caught:
-                main.next_question(INTERVIEW_ID)
+                main.next_question(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 500)
         self.assertNotIn("secret", caught.exception.detail)
         self.assertTrue(conn.rolled_back)
@@ -111,7 +114,7 @@ class EndpointFixTests(unittest.TestCase):
 
         cursor = ReportCursor()
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)):
-            result = main.get_interview_report(INTERVIEW_ID)
+            result = main.get_interview_report(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(result["role_title"], "Backend Engineer")
         self.assertEqual(result["turns"][0]["question"], "What is REST?")
         self.assertEqual(result["turns"][0]["adaptation"], {"reason": "Raise"})
@@ -122,7 +125,7 @@ class EndpointFixTests(unittest.TestCase):
     def test_report_rejects_bad_uuid(self):
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(FakeCursor())):
             with self.assertRaises(HTTPException) as caught:
-                main.get_interview_report("not-a-uuid")
+                main.get_interview_report("not-a-uuid", user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 400)
 
 

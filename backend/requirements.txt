@@ -7,6 +7,10 @@ google-genai>=1.20
 python-dotenv>=1.0
 python-multipart>=0.0.9
 pydantic>=2.7
+# Firebase ID-token verification (auth.py)
+google-auth>=2.30
+cryptography>=42
+requests>=2.31
 
 # Tests (python -m pytest backend)
 pytest>=8.0

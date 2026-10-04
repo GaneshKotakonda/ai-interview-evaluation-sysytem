@@ -14,10 +14,24 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:800
 const interviewPath = (interviewId, suffix) =>
   `${API_BASE_URL}/api/interviews/${encodeURIComponent(interviewId)}/${suffix}`;
 
+const userPath = (firebaseUid, suffix) =>
+  `${API_BASE_URL}/api/users/${encodeURIComponent(firebaseUid)}/${suffix}`;
+
+// Every endpoint (except /api/health) requires the signed-in user's Firebase
+// ID token. AuthContext registers the provider; Firebase's getIdToken()
+// returns a cached token and refreshes it shortly before it expires.
+let authTokenProvider = async () => null;
+
+export function setAuthTokenProvider(provider) {
+  authTokenProvider = provider;
+}
+
 async function request(url, { method = 'GET', json, formData } = {}, failureMessage) {
-  const options = { method };
+  const options = { method, headers: {} };
+  const token = await authTokenProvider();
+  if (token) options.headers.Authorization = `Bearer ${token}`;
   if (json !== undefined) {
-    options.headers = { 'Content-Type': 'application/json' };
+    options.headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(json);
   } else if (formData) {
     // The browser sets the multipart boundary header itself.
@@ -121,5 +135,33 @@ export const api = {
   getUserInterviews(firebaseUid) {
     return request(`${API_BASE_URL}/api/interviews/user/${encodeURIComponent(firebaseUid)}`, {},
       'Failed to fetch user history');
+  },
+
+  // 9. Owner-only: permanently delete one interview and its saved data.
+  // The owner is identified by the ID token, not by anything in the URL.
+  deleteInterview(interviewId) {
+    return request(
+      `${API_BASE_URL}/api/interviews/${encodeURIComponent(interviewId)}`,
+      { method: 'DELETE' },
+      'Failed to delete interview',
+    );
+  },
+
+  // 10. Profile metadata plus aggregated practice statistics.
+  getProfile(firebaseUid) {
+    return request(userPath(firebaseUid, 'profile'), {}, 'Failed to load profile');
+  },
+
+  // 11. Create or update the stored name/email for this Firebase user.
+  updateProfile(firebaseUid, { fullName = null, email = null } = {}) {
+    return request(userPath(firebaseUid, 'profile'), {
+      method: 'PUT',
+      json: { full_name: fullName, email },
+    }, 'Failed to save profile');
+  },
+
+  // 12. Every saved Standard report with its component scores, newest first.
+  getUserReports(firebaseUid) {
+    return request(userPath(firebaseUid, 'reports'), {}, 'Failed to load reports');
   },
 };

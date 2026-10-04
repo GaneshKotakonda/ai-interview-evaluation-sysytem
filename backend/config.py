@@ -67,6 +67,10 @@ CORS_ORIGINS = _env_list(
     ["http://localhost:5173", "http://127.0.0.1:5173"],
 )
 
+# Firebase project whose ID tokens the API accepts (the frontend's
+# VITE_FIREBASE_PROJECT_ID). Requests must carry a token from this project.
+FIREBASE_PROJECT_ID = _env_str("FIREBASE_PROJECT_ID", "ai-evaluation-40c8a")
+
 # Largest answer video accepted by /submit-answer, in megabytes.
 MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 200)
 

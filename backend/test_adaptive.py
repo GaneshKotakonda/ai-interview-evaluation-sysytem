@@ -9,6 +9,9 @@ from adaptive import determine_next_difficulty, should_generate_follow_up
 import adaptive_service as service
 import gemini_service
 import main
+from auth import AuthUser
+
+TEST_USER = AuthUser(uid="firebase-user-abc123")
 from test_main import FakeConnection, FakeCursor
 from adaptive_questions import fallback_question
 
@@ -116,8 +119,8 @@ class AdaptiveTests(unittest.TestCase):
 
         conn = FakeConnection(ReportCursor(responses=answers))
         with patch.object(main.database, "get_db_connection", return_value=conn):
-            first = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest())
-            replay = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest())
+            first = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=TEST_USER)
+            replay = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=TEST_USER)
         self.assertEqual(first, replay)
 
     def test_submission_evaluates_once_uses_server_question_and_preserves_video(self):
@@ -156,8 +159,8 @@ class AdaptiveTests(unittest.TestCase):
             gemini_service, "evaluate_answer_with_rag", return_value=evaluation
         ) as evaluate:
             first = main.submit_answer(INTERVIEW_ID, 1, "Client forged question", "An answer",
-                                       UploadFile(filename="video.webm", file=BytesIO(b"recording")))
-            replay = main.submit_answer(INTERVIEW_ID, 1, "Client forged question", "An answer", None)
+                                       UploadFile(filename="video.webm", file=BytesIO(b"recording")), user=TEST_USER)
+            replay = main.submit_answer(INTERVIEW_ID, 1, "Client forged question", "An answer", None, user=TEST_USER)
             self.assertEqual(first, replay)
             self.assertEqual(evaluate.call_count, 1)
             self.assertEqual(evaluate.call_args.args[0], "What is REST?")
@@ -165,7 +168,7 @@ class AdaptiveTests(unittest.TestCase):
             with open(os.path.join(directory, INTERVIEW_ID, "q_1.webm"), "rb") as video:
                 self.assertEqual(video.read(), b"recording")
             with self.assertRaises(service.HTTPException) as caught:
-                main.submit_answer(INTERVIEW_ID, 1, "q", "Changed answer", None)
+                main.submit_answer(INTERVIEW_ID, 1, "q", "Changed answer", None, user=TEST_USER)
             self.assertEqual(caught.exception.status_code, 409)
         self.assertEqual(cursor.answer["answer_quality_score"], 90)
         self.assertEqual(cursor.answer["difficulty"], "medium")
@@ -179,8 +182,8 @@ class AdaptiveTests(unittest.TestCase):
         with patch.object(main.database, "get_db_connection", return_value=conn), patch.object(
             gemini_service, "generate_adaptive_question", side_effect=lambda **ctx: fallback_question(ctx)
         ):
-            result = main.next_question(INTERVIEW_ID)
-            replay = main.next_question(INTERVIEW_ID)
+            result = main.next_question(INTERVIEW_ID, user=TEST_USER)
+            replay = main.next_question(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(result, replay)
         self.assertTrue(conn.committed)
         self.assertTrue(conn.closed)
@@ -190,7 +193,7 @@ class AdaptiveTests(unittest.TestCase):
         conn = FakeConnection(TurnCursor(None, None))
         with patch.object(main.database, "get_db_connection", return_value=conn):
             with self.assertRaises(service.HTTPException) as caught:
-                main.next_question(INTERVIEW_ID)
+                main.next_question(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 404)
         self.assertTrue(conn.rolled_back)
 
@@ -231,7 +234,7 @@ class AdaptiveTests(unittest.TestCase):
             gemini_service, "batch_evaluate_interview"
         ) as batch, patch.object(gemini_service, "evaluate_answer_with_rag") as evaluate:
             result = main.complete_and_evaluate_interview(
-                INTERVIEW_ID, main.EvaluateInterviewRequest(duration_seconds=300, vision_metrics={"eyeContact": 80})
+                INTERVIEW_ID, main.EvaluateInterviewRequest(duration_seconds=300, vision_metrics={"eyeContact": 80}), user=TEST_USER
             )
         self.assertEqual(result["scores"][0]["value"], 90)
         self.assertEqual(result["scores"][1]["value"], 80)
@@ -242,7 +245,7 @@ class AdaptiveTests(unittest.TestCase):
         conn = FakeConnection(FakeCursor(responses=[response()]))
         with patch.object(main.database, "get_db_connection", return_value=conn):
             with self.assertRaises(service.HTTPException) as caught:
-                main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest())
+                main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 409)
 
     def test_thresholds_and_bounds(self):

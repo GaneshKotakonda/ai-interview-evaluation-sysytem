@@ -117,4 +117,31 @@ describe('interview API contracts', () => {
     await api.getReport('a/b');
     expect(fetch.mock.calls[0][0]).toBe('http://localhost:8000/api/interviews/a%2Fb/report');
   });
+
+  it('sends the Firebase ID token on JSON, multipart and GET requests', async () => {
+    const { api, setAuthTokenProvider } = await import('./api');
+    setAuthTokenProvider(async () => 'id-token-123');
+    await api.startInterview('Role', 'uid');
+    await api.submitAnswer('interview-id', { questionIndex: 1, questionText: 'Q', candidateAnswer: 'A' });
+    await api.getProfile('uid');
+    fetch.mock.calls.forEach(([, options]) => {
+      expect(options.headers.Authorization).toBe('Bearer id-token-123');
+    });
+    expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('application/json');
+    // The browser must set the multipart boundary itself.
+    expect(fetch.mock.calls[1][1].headers['Content-Type']).toBeUndefined();
+  });
+
+  it('omits the Authorization header when signed out', async () => {
+    const { api } = await import('./api');
+    await api.getReport('interview-id');
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
+  });
+
+  it('deletes by interview id only; ownership comes from the token', async () => {
+    const { api } = await import('./api');
+    await api.deleteInterview('interview-id');
+    expect(fetch.mock.calls[0][0]).toBe('http://localhost:8000/api/interviews/interview-id');
+    expect(fetch.mock.calls[0][1].method).toBe('DELETE');
+  });
 });
