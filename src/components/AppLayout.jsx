@@ -3,6 +3,11 @@ import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 
+// -------------------------------------------------------------
+// Signed-in page frame: fixed sidebar (slide-over on mobile), top bar,
+// and the routed page in <Outlet />.
+// -------------------------------------------------------------
+
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
 

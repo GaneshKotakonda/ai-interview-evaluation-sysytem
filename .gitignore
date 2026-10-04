@@ -10,6 +10,10 @@ dist
 *.env
 backend/.env
 
+# Python virtual environments
+.venv/
+venv/
+
 # Python bytecode & cache
 __pycache__/
 *.py[cod]

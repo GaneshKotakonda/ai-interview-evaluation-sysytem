@@ -4,6 +4,11 @@ import { AuthProvider } from './context/AuthContext';
 import App from './App';
 import './index.css';
 
+// -------------------------------------------------------------
+// Application bootstrap: router → auth provider → routes.
+// AuthProvider sits inside the router so auth-aware pages can navigate.
+// -------------------------------------------------------------
+
 createRoot(document.getElementById('root')).render(
   <BrowserRouter>
     <AuthProvider>

@@ -3,6 +3,11 @@ import { Eye, EyeOff, LoaderCircle, Mic } from 'lucide-react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
+// -------------------------------------------------------------
+// Sign-in page. Firebase error codes are mapped to short messages; wrong
+// email and wrong password share one message so accounts cannot be probed.
+// -------------------------------------------------------------
+
 function friendlyFirebaseError(error) {
   const code = error?.code || '';
   if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found')) {

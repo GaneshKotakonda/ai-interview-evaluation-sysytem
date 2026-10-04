@@ -39,3 +39,11 @@ it('retries a failed result fetch without fabricated statistics', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Retry Results' }));
   expect(await screen.findByText('640')).toBeInTheDocument();
 });
+it('prefers an explicit ?id= over the last played session and labels the last turn as the Boss Round', async () => {
+  getArenaResults.mockResolvedValueOnce({ interview_mode: 'game', max_turns: 6, total_xp: 10, best_streak: 0, average_score: 50, highest_difficulty: 'medium', boss_score: 50, questions_completed: 6, strongest_areas: [], practice_areas: [], turns: [{ question_index: 6, topic: 'Scaling', feedback: 'Final', evaluation_source: 'gemini' }] });
+  render(<MemoryRouter initialEntries={['/arena/results?id=from-history']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Routes>
+    <Route path="/arena/results" element={<ArenaResults />} />
+  </Routes></MemoryRouter>);
+  expect(await screen.findByText('Boss Round · Scaling')).toBeInTheDocument();
+  expect(getArenaResults).toHaveBeenCalledWith('from-history');
+});

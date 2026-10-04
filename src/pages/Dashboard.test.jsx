@@ -120,3 +120,12 @@ it.each([['Start Standard Interview', '/readiness'], ['Enter Interview Arena', '
   fireEvent.click(screen.getByRole('button', { name: label }));
   expect(await screen.findByText(`Destination ${path}`)).toBeInTheDocument();
 });
+it('links completed rows to their saved report or Arena results', async () => {
+  getUserInterviews.mockResolvedValue([
+    { id: 'std-1', role_title: 'Backend Engineer', interview_mode: 'standard', status: 'completed', overall_score: 80, created_at: '2026-09-25T10:00:00Z' },
+    { id: 'game-1', role_title: 'Frontend Developer', interview_mode: 'game', status: 'completed', overall_score: 70, created_at: '2026-09-24T10:00:00Z' },
+  ]);
+  renderDashboard();
+  expect(await screen.findByRole('link', { name: 'View result for Backend Engineer' })).toHaveAttribute('href', '/report?id=std-1');
+  expect(screen.getByRole('link', { name: 'View result for Frontend Developer' })).toHaveAttribute('href', '/arena/results?id=game-1');
+});

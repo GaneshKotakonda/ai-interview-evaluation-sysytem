@@ -1,13 +1,22 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Trophy } from 'lucide-react';
 import { api } from '../services/api';
+import { STORAGE_KEYS } from '../utils/interviewJourney';
 
+// -------------------------------------------------------------
+// Arena results page
+// -------------------------------------------------------------
+// Loads the saved summary for ?id=<uuid> (Dashboard links) or, right after
+// a game, for the id ArenaPlay stored in sessionStorage. Everything shown
+// comes from the server; nothing is computed or invented here.
 export default function ArenaResults() {
-  const interviewId = sessionStorage.getItem('arena-interview-id');
+  const [searchParams] = useSearchParams();
+  const interviewId = searchParams.get('id') || sessionStorage.getItem(STORAGE_KEYS.arenaInterviewId);
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
+  // Fetch (and re-fetch on "Retry Results") the saved summary.
   useEffect(() => {
     if (!interviewId) return;
     let active = true;
@@ -29,6 +38,10 @@ export default function ArenaResults() {
     {error ? <><p role="alert" className="my-4">{error}</p><button className="primary-btn" onClick={() => setAttempt((n) => n + 1)}>Retry Results</button></> : <p role="status" className="mt-4">Loading your saved results…</p>}
   </section>;
 
+  // The last turn of a full Arena session is the Boss Round.
+  const bossTurn = results.max_turns || 6;
+  const capitalize = (text) => (text ? text[0].toUpperCase() + text.slice(1) : '—');
+
   return <div className="mx-auto max-w-5xl space-y-6">
     <header className="rounded-2xl bg-navy-900 p-8 text-white">
       <Trophy aria-hidden="true" className="h-8 w-8 text-teal-200" />
@@ -39,7 +52,7 @@ export default function ArenaResults() {
       {[
         ['Total XP', results.total_xp], ['Best Streak', results.best_streak],
         ['Average Answer Score', `${results.average_score} / 100`],
-        ['Highest Difficulty Reached', results.highest_difficulty[0].toUpperCase() + results.highest_difficulty.slice(1)],
+        ['Highest Difficulty Reached', capitalize(results.highest_difficulty)],
         ['Boss Round Score', results.boss_score == null ? 'Unavailable' : `${results.boss_score} / 100`],
         ['Questions Completed', results.questions_completed],
       ].map(([label, value]) => <div className="card p-5" key={label}><p className="text-sm text-slate-500">{label}</p><p className="mt-2 text-2xl font-bold text-navy-900">{value}</p></div>)}
@@ -54,7 +67,7 @@ export default function ArenaResults() {
     <section className="card p-6">
       <h2 className="text-lg font-bold">Challenge Feedback</h2>
       <ol className="mt-4 space-y-4">{results.turns.map((turn) => <li key={turn.question_index} className="rounded-xl bg-slate-50 p-4">
-        <h3 className="font-semibold">{turn.question_index === 6 ? 'Boss Round' : `Level ${turn.question_index}`} · {turn.topic}</h3>
+        <h3 className="font-semibold">{turn.question_index === bossTurn ? 'Boss Round' : `Level ${turn.question_index}`} · {turn.topic}</h3>
         <p className="mt-2 text-sm leading-6 text-slate-600">{turn.feedback}</p>
         {turn.evaluation_source === 'fallback' && <p className="mt-2 text-xs text-amber-700">Approximate evaluation — AI evaluator unavailable.</p>}
       </li>)}</ol>

@@ -1,3 +1,10 @@
+// -------------------------------------------------------------
+// MediaPipe face analysis helpers used by BehaviorMonitor.
+// The model and WASM runtime load from a CDN on first use (GPU delegate,
+// falling back to CPU). All outputs are coarse, observable signals — face
+// present, approximate gaze, head alignment — not identity or emotion.
+// -------------------------------------------------------------
+
 const VISION_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';

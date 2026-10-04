@@ -1,8 +1,32 @@
-// The report API returns aggregate scores. Turn details are kept for this
-// browser's current interview and must never be mixed with another report.
+// -------------------------------------------------------------
+// Browser storage keys shared by the interview pages
+// -------------------------------------------------------------
+// One place for every key so pages cannot drift apart through a typo.
+export const STORAGE_KEYS = {
+  progress: 'ai-interview-progress',          // turns of the current Standard interview
+  duration: 'ai-interview-duration',          // seconds spent, saved on completion
+  visionMetrics: 'ai-interview-vision-metrics', // last BehaviorMonitor snapshot
+  interviewId: 'current-interview-id',        // active Standard interview UUID
+  latestReport: 'latest-evaluation-report',   // cached /complete response
+  roleTitle: 'target-role-title',             // chosen on the Readiness page
+  jobDescription: 'target-job-description',
+  arenaInterviewId: 'arena-interview-id',     // sessionStorage: last Arena UUID
+};
+
+// Forget everything about the previous Standard interview.
+export function clearInterviewProgress() {
+  [STORAGE_KEYS.progress, STORAGE_KEYS.duration, STORAGE_KEYS.visionMetrics].forEach((key) =>
+    localStorage.removeItem(key));
+}
+
+// -------------------------------------------------------------
+// Locally saved adaptive journey
+// -------------------------------------------------------------
+// Turn details are kept for this browser's current interview and must never
+// be mixed with another interview's report, so the stored id must match.
 export function readInterviewJourney(interviewId) {
   try {
-    const progress = JSON.parse(localStorage.getItem('ai-interview-progress'));
+    const progress = JSON.parse(localStorage.getItem(STORAGE_KEYS.progress));
     return interviewId && progress?.interviewId === interviewId && Array.isArray(progress.responses)
       ? progress.responses.filter((response) => response.completed)
       : [];

@@ -1,4 +1,12 @@
 -- AI Interview Evaluation System - PostgreSQL Schema
+--
+-- Safe to re-run: every statement is additive or idempotent, so existing
+-- installations are migrated in place. Apply with:
+--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f schema.sql
+
+-- 0. gen_random_uuid() is built in from PostgreSQL 13; on 12 and older it
+-- comes from pgcrypto. Creating the extension is harmless on newer versions.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- 1. Candidates / Users Table
 CREATE TABLE IF NOT EXISTS users (
@@ -41,7 +49,9 @@ CREATE TABLE IF NOT EXISTS interviews (
 );
 
 -- 3. Question Rubrics (Vector Storage for RAG Evaluation)
--- Stores key concept chunks & 768-dimensional embeddings (Gemini text-embedding-004)
+-- One row per private rubric point with its embedding. Embeddings are
+-- requested at a fixed 768 dimensions (EMBEDDING_DIMENSIONS); the array is
+-- empty when the embedding service was unavailable.
 CREATE TABLE IF NOT EXISTS question_rubrics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     interview_id UUID REFERENCES interviews(id) ON DELETE CASCADE,
@@ -64,8 +74,8 @@ CREATE TABLE IF NOT EXISTS interview_responses (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Comprehensive Evaluation Reports
--- Adaptive metadata: additive migrations preserve legacy sessions/responses.
+-- 4b. Adaptive interview metadata
+-- Additive migrations preserve legacy sessions/responses.
 ALTER TABLE interviews
     ADD COLUMN IF NOT EXISTS current_difficulty VARCHAR(10) NOT NULL DEFAULT 'medium'
         CHECK (current_difficulty IN ('easy', 'medium', 'hard', 'expert')),
@@ -115,6 +125,8 @@ ALTER TABLE interview_responses
     ADD COLUMN IF NOT EXISTS next_result JSONB;
 
 -- 5. Comprehensive Evaluation Reports
+-- camera_engagement_score is NULL when the browser's camera model produced
+-- no data; the overall score is then re-weighted without it.
 CREATE TABLE IF NOT EXISTS evaluation_reports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     interview_id UUID UNIQUE REFERENCES interviews(id) ON DELETE CASCADE,
@@ -137,6 +149,7 @@ ALTER TABLE evaluation_reports
     ADD COLUMN IF NOT EXISTS speech_fluency_score INT;
 
 -- 6. Cosine Similarity Function for Vector Embeddings
+-- Returns 0 for empty, mismatched-length or zero vectors.
 CREATE OR REPLACE FUNCTION cosine_similarity(a FLOAT8[], b FLOAT8[])
 RETURNS FLOAT8 AS $$
 DECLARE
@@ -160,6 +173,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
+-- 7. Interview Arena
 -- Arena keeps its game state separate from professional evaluations.
 ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS boss_round BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS arena_stats (
@@ -184,7 +198,9 @@ CREATE TABLE IF NOT EXISTS arena_turns (
     game_result JSONB NOT NULL CHECK (jsonb_typeof(game_result) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- 8. Indexes for the hot lookups
 CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);
+CREATE INDEX IF NOT EXISTS question_rubrics_lookup_idx ON question_rubrics(interview_id, question_index);
 CREATE INDEX IF NOT EXISTS interviews_user_created_idx ON interviews(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS interview_questions_interview_idx ON interview_questions(interview_id);
 CREATE INDEX IF NOT EXISTS interview_responses_interview_idx ON interview_responses(interview_id);

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Check, CheckCircle2, Clock3, LoaderCircle, Sparkles, AlertCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import { readInterviewJourney } from '../utils/interviewJourney';
+import { STORAGE_KEYS, readInterviewJourney } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // BLOCK 1: Utility Functions
@@ -21,12 +21,14 @@ export default function InterviewComplete() {
   // -------------------------------------------------------------
   // BLOCK 2: Component State & Local Storage Data
   // -------------------------------------------------------------
-  const duration = Number(localStorage.getItem('ai-interview-duration'));
-  const interviewId = localStorage.getItem('current-interview-id');
+  const duration = Number(localStorage.getItem(STORAGE_KEYS.duration));
+  const interviewId = localStorage.getItem(STORAGE_KEYS.interviewId);
 
+  // Real camera measurements from the interview, or null when the vision
+  // model never produced data (the report then omits camera engagement).
   let visionMetrics = null;
   try {
-    visionMetrics = JSON.parse(localStorage.getItem('ai-interview-vision-metrics') || 'null');
+    visionMetrics = JSON.parse(localStorage.getItem(STORAGE_KEYS.visionMetrics) || 'null');
   } catch {
     visionMetrics = null;
   }
@@ -58,7 +60,7 @@ export default function InterviewComplete() {
 
         const report = await api.completeInterview(
           interviewId,
-          visionMetrics || { eyeContact: 75 },
+          visionMetrics || {},
           Number.isFinite(duration) && duration > 0 ? duration : 0,
         );
 
@@ -66,7 +68,7 @@ export default function InterviewComplete() {
 
         setEvaluationReport(report);
         // Cache report locally for immediate display in Report.jsx
-        localStorage.setItem('latest-evaluation-report', JSON.stringify(report));
+        localStorage.setItem(STORAGE_KEYS.latestReport, JSON.stringify(report));
       } catch (err) {
         if (isMounted) {
           setEvaluationError(
@@ -89,7 +91,7 @@ export default function InterviewComplete() {
   // BLOCK 4: Dynamic Analysis Checklist Items
   // -------------------------------------------------------------
   const totalFillers = evaluationReport?.nlp_metrics?.total_fillers ?? 0;
-  const eyeContactVal = visionMetrics?.eyeContact ?? 75;
+  const eyeContactVal = visionMetrics?.eyeContact;
 
   const analysisItems = [
     {
@@ -115,7 +117,9 @@ export default function InterviewComplete() {
     },
     {
       label: 'Camera Engagement',
-      state: `Approximate screen gaze: ${eyeContactVal}%`,
+      state: Number.isFinite(eyeContactVal)
+        ? `Approximate screen gaze: ${eyeContactVal}%`
+        : 'Not measured · camera analysis was unavailable',
       complete: true,
     },
   ];

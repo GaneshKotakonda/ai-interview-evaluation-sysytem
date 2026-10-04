@@ -1,5 +1,9 @@
 import { CheckCircle2, AlertCircle } from 'lucide-react';
 
+// -------------------------------------------------------------
+// One readiness row (camera, microphone, network…) with a ready/waiting badge.
+// -------------------------------------------------------------
+
 export default function DeviceCheck({ icon: Icon, label, status, ready, helper }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4">

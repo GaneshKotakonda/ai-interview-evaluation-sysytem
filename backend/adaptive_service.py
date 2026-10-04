@@ -1,30 +1,44 @@
-"""Persistence and orchestration for adaptive turns.
+"""Persistence and orchestration for adaptive interview turns.
 
-All mutating callers lock the parent interview until commit. This serializes
-submit, advance and completion across processes, including external AI calls.
+Concurrency model: every mutating endpoint first locks the parent
+``interviews`` row (``SELECT ... FOR UPDATE``) and holds it until commit.
+That serialises submit, advance and completion for one interview across
+processes, including the time spent waiting on Gemini.
+
+Idempotency: a submitted answer is stored once per question, and the result
+of advancing past it is cached in ``interview_responses.next_result``, so a
+client retry after a network failure gets the original result back.
 """
 import json
 import logging
 import uuid
 
 from fastapi import HTTPException
+
+import arena
 import gemini_service
 import nlp_evaluator
-import arena
 from adaptive import adaptation_for
 
 logger = logging.getLogger(__name__)
+
+# Evaluation fields that are safe to show the candidate (no rubric text).
 EVALUATION_FIELDS = (
     "answer_quality_score", "communication_score", "strengths", "improvements",
     "feedback", "missing_concepts", "evaluation_source",
 )
 
 
+# -------------------------------------------------------------
+# BLOCK 1: Public (candidate-visible) projections
+# -------------------------------------------------------------
 def public_evaluation(response):
+    """Return only the candidate-visible evaluation fields of a response row."""
     return {key: response[key] for key in EVALUATION_FIELDS}
 
 
 def public_question(question):
+    """Return a question row without its private rubric."""
     return {
         "index": question["question_index"], "question": question["question_text"],
         "difficulty": question["difficulty"], "is_follow_up": question["is_follow_up"],
@@ -33,24 +47,48 @@ def public_question(question):
     }
 
 
-def lock_interview(cur, interview_id):
+# -------------------------------------------------------------
+# BLOCK 2: Loading and guarding the interview row
+# -------------------------------------------------------------
+def fetch_interview(cur, interview_id, lock=True):
+    """Load an interview by UUID; 400 on a malformed id, 404 when missing.
+
+    ``lock=True`` adds ``FOR UPDATE`` (required before any write);
+    read-only endpoints pass ``lock=False`` to avoid blocking active turns.
+    """
     try:
         uuid.UUID(interview_id)
     except ValueError:
         raise HTTPException(400, "Invalid interview_id UUID format.")
-    cur.execute("SELECT * FROM interviews WHERE id = %s FOR UPDATE;", (interview_id,))
+    suffix = " FOR UPDATE" if lock else ""
+    cur.execute(f"SELECT * FROM interviews WHERE id = %s{suffix};", (interview_id,))
     interview = cur.fetchone()
     if not interview:
         raise HTTPException(404, "Interview not found.")
     return interview
 
 
+def lock_interview(cur, interview_id):
+    """Load and row-lock an interview (see ``fetch_interview``)."""
+    return fetch_interview(cur, interview_id, lock=True)
+
+
 def require_active(interview):
+    """409 unless the interview is still in progress."""
     if interview["status"] != "in_progress":
         raise HTTPException(409, "Interview is no longer active.")
 
 
+# -------------------------------------------------------------
+# BLOCK 3: Storing a generated question and its rubric vectors
+# -------------------------------------------------------------
 def store_question(cur, interview_id, turn, content):
+    """Insert the question row, then one ``question_rubrics`` row per point.
+
+    Each rubric point is embedded for later vector search. When embedding
+    fails the text is still stored with an empty vector, so grading can use
+    the full rubric instead of the retrieved subset.
+    """
     cur.execute(
         """INSERT INTO interview_questions
            (interview_id, question_index, question_text, difficulty, is_follow_up,
@@ -66,7 +104,6 @@ def store_question(cur, interview_id, turn, content):
             embedding = gemini_service.get_embedding(rubric)
         except Exception:
             embedding = []
-        # Keep the textual rubric even when the embedding provider fails.
         cur.execute(
             """INSERT INTO question_rubrics
                (interview_id, question_index, question_text, ideal_concept_chunk, embedding)
@@ -76,7 +113,11 @@ def store_question(cur, interview_id, turn, content):
     return question
 
 
+# -------------------------------------------------------------
+# BLOCK 4: Answer submission helpers
+# -------------------------------------------------------------
 def question_for_submission(cur, interview, question_index):
+    """Return the server-issued question for the active turn, or 409."""
     require_active(interview)
     if question_index != interview["current_turn"]:
         raise HTTPException(409, "Submit the current question before advancing.")
@@ -91,11 +132,13 @@ def question_for_submission(cur, interview, question_index):
 
 
 def existing_submission(cur, question):
+    """Return the stored response for ``question``, if one was accepted."""
     cur.execute("SELECT * FROM interview_responses WHERE question_id = %s;", (str(question["id"]),))
     return cur.fetchone()
 
 
 def submission_result(response):
+    """API payload returned by /submit-answer (initial call and retries)."""
     return {
         "status": "success", "response_id": str(response["id"]),
         "semantic_similarity_score": round(response["semantic_similarity_score"] or 0, 3),
@@ -105,10 +148,18 @@ def submission_result(response):
 
 
 def evaluate_and_store(conn, cur, interview, question, answer, video_url):
+    """Embed, retrieve rubric matches, grade with Gemini and persist one answer.
+
+    Pipeline: answer embedding → cosine search over this question's rubric
+    vectors → filler count → Gemini grading (with fallback) → INSERT.
+    """
+    # Step A: Embed the answer (empty or failed embeddings skip retrieval).
     try:
         vector = gemini_service.get_embedding(answer) if answer.strip() else []
     except Exception:
         vector = []
+
+    # Step B: Retrieve the closest rubric points; default to the full rubric.
     rubric = question["rubric_points"]
     similarity = 0.0
     if vector:
@@ -116,11 +167,15 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url):
             conn, str(interview["id"]), question["question_index"], vector,
         )
         rubric = retrieved or rubric
+
+    # Step C: Communication signal and AI grading.
     fillers = nlp_evaluator.count_filler_words(answer)
     evaluation = gemini_service.evaluate_answer_with_rag(
         question["question_text"], answer, rubric, similarity, fillers["total_count"],
         interview["job_description"],
     )
+
+    # Step D: Persist the answer with a copy of the question metadata.
     cur.execute(
         """INSERT INTO interview_responses (
            interview_id, question_id, question_index, question_text, candidate_answer,
@@ -142,9 +197,22 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url):
     return cur.fetchone()
 
 
+# -------------------------------------------------------------
+# BLOCK 5: Advancing to the next turn
+# -------------------------------------------------------------
 def advance(cur, interview, response_id=None):
+    """Apply the adaptive policy to the latest answer and issue the next turn.
+
+    Returns the cached result when this response was already advanced, so
+    retries are safe. On the final turn no question is generated and
+    ``is_complete`` is True; Arena sessions are also closed here.
+    """
+    # Step A: Arena retries may arrive after the session completed; their
+    # cached result is still returned, so the active check is deferred.
     if interview.get("interview_mode") != "game":
         require_active(interview)
+
+    # Step B: Find the response being advanced (explicit token or latest).
     if response_id:
         cur.execute(
             "SELECT * FROM interview_responses WHERE interview_id = %s AND id = %s;",
@@ -167,6 +235,7 @@ def advance(cur, interview, response_id=None):
     if response["evaluated_at"] is None:
         raise HTTPException(409, "Answer evaluation is not yet available.")
 
+    # Step C: Deterministic policy, then Arena/final-turn overrides.
     adaptation = adaptation_for(response)
     final_turn = interview["current_turn"] >= interview["max_turns"]
     turn = interview["current_turn"]
@@ -179,6 +248,8 @@ def advance(cur, interview, response_id=None):
         adaptation.update(next_difficulty=response["difficulty"], is_follow_up=False,
                           reason="Maximum answer turns reached; finalize the report.")
     else:
+        # Step D: Generate and store the next question with a short,
+        # identity-free history so the model avoids repeated topics.
         cur.execute(
             """SELECT q.topic, q.question_text AS question, q.difficulty,
                       r.answer_quality_score AS score
@@ -186,7 +257,6 @@ def advance(cur, interview, response_id=None):
                WHERE q.interview_id = %s ORDER BY q.question_index;""",
             (str(interview["id"]),),
         )
-        # At most 20 short entries; no identity/profile fields or answer history.
         history = cur.fetchall()
         content = gemini_service.generate_adaptive_question(
             role_title=interview["role_title"],
@@ -206,11 +276,14 @@ def advance(cur, interview, response_id=None):
             "UPDATE interviews SET current_turn = %s, current_difficulty = %s WHERE id = %s;",
             (turn, adaptation["next_difficulty"], str(interview["id"])),
         )
+
     result = {
         "evaluation": public_evaluation(response), "adaptation": adaptation,
         "next_question": next_question, "current_turn": turn,
         "max_turns": interview["max_turns"], "is_complete": final_turn,
     }
+
+    # Step E: Arena awards XP every turn and closes the session itself.
     if interview.get('interview_mode') == 'game':
         result['game'] = arena.award(cur, interview, response)
         if final_turn:
@@ -218,6 +291,8 @@ def advance(cur, interview, response_id=None):
                 duration_seconds=GREATEST(0, EXTRACT(EPOCH FROM (NOW()-created_at))::integer),
                 overall_score=(SELECT ROUND(AVG(answer_quality_score)) FROM interview_responses WHERE interview_id=%s)
                 WHERE id=%s;""", (str(interview['id']), str(interview['id'])))
+
+    # Step F: Cache the result for idempotent retries.
     cur.execute("UPDATE interview_responses SET next_result = %s WHERE id = %s;",
                 (json.dumps(result), str(response["id"])))
     logger.info(
@@ -226,3 +301,39 @@ def advance(cur, interview, response_id=None):
         adaptation["is_follow_up"], adaptation["next_difficulty"], final_turn,
     )
     return result
+
+
+# -------------------------------------------------------------
+# BLOCK 6: Per-turn summary for saved reports
+# -------------------------------------------------------------
+def report_turns(cur, interview_id):
+    """Return the candidate-visible journey of a finished interview.
+
+    Lets the Report page show every turn for any past interview, not only
+    the one whose progress is still in this browser's localStorage.
+    """
+    cur.execute(
+        """SELECT r.question_index, r.question_text, r.difficulty, r.is_follow_up, r.topic,
+                  r.answer_quality_score, r.feedback, r.evaluation_source, r.next_result
+           FROM interview_responses r
+           WHERE r.interview_id = %s
+           ORDER BY r.question_index;""",
+        (interview_id,),
+    )
+    turns = []
+    for row in cur.fetchall():
+        cached = row.get("next_result") or {}
+        turns.append({
+            "index": row["question_index"],
+            "question": row["question_text"],
+            "difficulty": row["difficulty"],
+            "is_follow_up": bool(row["is_follow_up"]),
+            "topic": row["topic"],
+            "evaluation": {
+                "answer_quality_score": row["answer_quality_score"],
+                "feedback": row["feedback"],
+                "evaluation_source": row["evaluation_source"],
+            },
+            "adaptation": cached.get("adaptation") if isinstance(cached, dict) else None,
+        })
+    return turns

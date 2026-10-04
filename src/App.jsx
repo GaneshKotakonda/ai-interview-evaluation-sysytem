@@ -13,6 +13,14 @@ import Arena from './pages/Arena';
 import ArenaPlay from './pages/ArenaPlay';
 import ArenaResults from './pages/ArenaResults';
 
+// -------------------------------------------------------------
+// Route table.
+// Public: /login, /signup, /forgot-password.
+// Protected (signed-in users, inside the sidebar layout): dashboard,
+// Standard interview flow (readiness → interview → complete → report) and
+// Arena flow (setup → play → results). Unknown paths go to the dashboard.
+// -------------------------------------------------------------
+
 export default function App() {
   return (
     <Routes>

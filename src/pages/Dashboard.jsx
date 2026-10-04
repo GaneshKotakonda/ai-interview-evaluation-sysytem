@@ -11,13 +11,24 @@ import {
   ListChecks,
   LoaderCircle,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import StatCard from '../components/StatCard';
 import ProgressBar from '../components/ProgressBar';
 import { api } from '../services/api';
+import { clearInterviewProgress } from '../utils/interviewJourney';
 
+// -------------------------------------------------------------
+// BLOCK 1: Helpers
+// -------------------------------------------------------------
 const statIcons = [ListChecks, Gauge, Award, CheckCircle2];
+
+// Where a history row's "View" link points: Arena sessions have their own
+// results page; Standard interviews open the saved report.
+function resultLink(interview) {
+  const id = encodeURIComponent(interview.id);
+  return interview.interview_mode === 'game' ? `/arena/results?id=${id}` : `/report?id=${id}`;
+}
 
 function isCompleted(interview) {
   return interview.status === 'completed' || interview.status === 'evaluated';
@@ -38,6 +49,11 @@ function formatDuration(seconds) {
   return `${minutes}m ${remainder}s`;
 }
 
+// -------------------------------------------------------------
+// BLOCK 2: Page — stats, mode cards and recent history
+// -------------------------------------------------------------
+// Every number on this page is computed from the user's real saved
+// interviews; nothing is substituted when the history cannot be loaded.
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -47,6 +63,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
 
+  // Load the signed-in user's interview history once per user.
   useEffect(() => {
     let isMounted = true;
 
@@ -132,8 +149,7 @@ export default function Dashboard() {
   ];
 
   const startNewInterview = () => {
-    localStorage.removeItem('ai-interview-progress');
-    localStorage.removeItem('ai-interview-duration');
+    clearInterviewProgress();
     navigate('/readiness');
   };
 
@@ -240,6 +256,7 @@ export default function Dashboard() {
                   <th className="px-6 py-3 font-semibold">Duration</th>
                   <th className="px-6 py-3 font-semibold">Score</th>
                   <th className="px-6 py-3 font-semibold">Status</th>
+                  <th className="px-6 py-3 font-semibold"><span className="sr-only">Result</span></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -264,6 +281,15 @@ export default function Dashboard() {
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
                         <CheckCircle2 className="h-3.5 w-3.5" /> Completed
                       </span>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <Link
+                        to={resultLink(item)}
+                        aria-label={`View result for ${item.role_title}`}
+                        className="text-sm font-semibold text-navy-700 hover:text-navy-900"
+                      >
+                        View
+                      </Link>
                     </td>
                   </tr>
                 ))}

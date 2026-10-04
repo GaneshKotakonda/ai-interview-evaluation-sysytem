@@ -10,7 +10,9 @@ import {
 } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { clearInterviewProgress } from '../utils/interviewJourney';
 
+// Navigation entries. Disabled items are planned features shown as "Soon".
 const items = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', enabled: true },
   { label: 'Start Interview', icon: Mic, to: '/readiness', enabled: true },
@@ -67,10 +69,8 @@ export default function Sidebar({ mobileOpen, onClose }) {
                 key={label}
                 to={to}
                 onClick={() => {
-                  if (label === 'Start Interview') {
-                    localStorage.removeItem('ai-interview-progress');
-                    localStorage.removeItem('ai-interview-duration');
-                  }
+                  // Starting fresh must not show the previous interview's turns.
+                  if (label === 'Start Interview') clearInterviewProgress();
                   onClose();
                 }}
                 className={({ isActive }) =>

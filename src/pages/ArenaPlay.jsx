@@ -3,7 +3,15 @@ import { Gamepad2, Loader2 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
+import { STORAGE_KEYS } from '../utils/interviewJourney';
 
+// -------------------------------------------------------------
+// Arena game screen
+// -------------------------------------------------------------
+// Flow per level: answer → submit (graded once, retry-safe) → advance (XP,
+// streak, next question) → result card → "Next Challenge". The config comes
+// from the Arena setup page through router state; without it the user is
+// sent back to choose a practice area. Text answers only, no camera.
 const difficultyLabel = (value) => value ? value[0].toUpperCase() + value.slice(1) : '';
 
 export default function ArenaPlay() {
@@ -36,6 +44,8 @@ export default function ArenaPlay() {
     return () => { mountedRef.current = false; };
   }, []);
 
+  // Start the Arena session once; the shared promise survives StrictMode
+  // effect replays so only one session is created.
   useEffect(() => {
     if (!valid) return;
     let active = true;
@@ -49,7 +59,7 @@ export default function ArenaPlay() {
     startRef.current.then((data) => {
       if (!active) return;
       if (data.interview_mode !== 'game' || !data.question) throw new Error('Invalid Arena session');
-      sessionStorage.setItem('arena-interview-id', data.interview_id);
+      sessionStorage.setItem(STORAGE_KEYS.arenaInterviewId, data.interview_id);
       setSession(data);
       setQuestion(data.question);
       setPhase('answering');
@@ -62,6 +72,7 @@ export default function ArenaPlay() {
     return () => { active = false; };
   }, [valid, attempt]);
 
+  // Submit the answer (if not yet accepted), then advance to get the result.
   async function submit() {
     if (busyRef.current || result || (!responseRef.current && !answer.trim())) return;
     busyRef.current = true;
@@ -98,6 +109,7 @@ export default function ArenaPlay() {
     }
   }
 
+  // Spend the single session hint on the current, unanswered level.
   async function requestHint() {
     if (busyRef.current || locked || game.remaining_hints === 0) return;
     busyRef.current = true;
@@ -119,6 +131,7 @@ export default function ArenaPlay() {
     }
   }
 
+  // Move to the next level, or to the results page after the Boss Round.
   function nextChallenge() {
     if (result.is_complete) {
       navigate('/arena/results');

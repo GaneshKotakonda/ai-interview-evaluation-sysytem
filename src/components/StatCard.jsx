@@ -1,3 +1,7 @@
+// -------------------------------------------------------------
+// Dashboard statistic tile: label, value, caption and an icon.
+// -------------------------------------------------------------
+
 export default function StatCard({ icon: Icon, label, value, trend }) {
   return (
     <article className="card p-5">

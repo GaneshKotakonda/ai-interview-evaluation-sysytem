@@ -3,6 +3,11 @@ import { Link } from 'react-router-dom';
 import { LoaderCircle, Mic } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
+// -------------------------------------------------------------
+// Password reset. The success message is shown even for unknown emails so
+// the page does not reveal which addresses have accounts.
+// -------------------------------------------------------------
+
 function friendlyResetError(error) {
   const code = error?.code || '';
   if (code.includes('too-many-requests')) return 'Too many attempts. Please wait and try again.';

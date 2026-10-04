@@ -15,12 +15,13 @@ import { useNavigate } from 'react-router-dom';
 import BehaviorMonitor from '../components/BehaviorMonitor';
 import { api } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
 
 // Storage keys for persisting interview state and metrics in localStorage
-const STORAGE_KEY = 'ai-interview-progress';
-const DURATION_KEY = 'ai-interview-duration';
-const INTERVIEW_ID_KEY = 'current-interview-id';
-const INTERVIEW_SECONDS = 10 * 60; // 10 minutes total timer
+const STORAGE_KEY = STORAGE_KEYS.progress;
+const DURATION_KEY = STORAGE_KEYS.duration;
+const INTERVIEW_ID_KEY = STORAGE_KEYS.interviewId;
+const INTERVIEW_SECONDS = 10 * 60; // 10-minute guide timer (informational; it does not end the interview)
 
 // Helper to format remaining seconds into MM:SS display
 function formatTime(seconds) {
@@ -93,11 +94,11 @@ export default function Interview() {
   // the first role-specific question using Gemini,
   // specifically tailored to the target role and custom job description.
   const targetRole = useMemo(
-    () => localStorage.getItem('target-role-title') || 'Software Engineer',
+    () => localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer',
     []
   );
   const targetJd = useMemo(
-    () => localStorage.getItem('target-job-description') || '',
+    () => localStorage.getItem(STORAGE_KEYS.jobDescription) || '',
     []
   );
 
@@ -106,8 +107,8 @@ export default function Interview() {
 
     async function initInterviewSession() {
       setLoadingQuestions(true);
-      const activeRole = localStorage.getItem('target-role-title') || 'Software Engineer';
-      const activeJd = localStorage.getItem('target-job-description') || '';
+      const activeRole = localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer';
+      const activeJd = localStorage.getItem(STORAGE_KEYS.jobDescription) || '';
 
       try {
         // Share the start request across StrictMode effect replays.
@@ -127,11 +128,10 @@ export default function Interview() {
         setMaxTurns(sessionData.max_turns);
         setInterviewId(sessionData.interview_id);
         setResponses([{ ...sessionData.question, questionId: sessionData.question.index, answer: '', completed: false }]);
+        // A new session starts clean: forget the previous interview's data.
         localStorage.setItem(INTERVIEW_ID_KEY, sessionData.interview_id);
-        localStorage.removeItem('latest-evaluation-report');
-        localStorage.removeItem(STORAGE_KEY);
-        localStorage.removeItem(DURATION_KEY);
-        localStorage.removeItem('ai-interview-vision-metrics');
+        localStorage.removeItem(STORAGE_KEYS.latestReport);
+        clearInterviewProgress();
         setFlowError('');
       } catch (err) {
         if (!isMounted) return;
@@ -222,7 +222,9 @@ export default function Interview() {
   // -------------------------------------------------------------
   // BLOCK 5: Timer & Progress Local Storage Synchronization
   // -------------------------------------------------------------
-  // Runs 1-second countdown and saves interview text progress locally.
+  // Runs the 1-second countdown, and saves turn progress locally whenever the
+  // turns change (the Report page reads it). The timer value is deliberately
+  // not part of the saved state, so storage is not rewritten every second.
   useEffect(() => {
     const timer = window.setInterval(() => {
       setSecondsLeft((current) => (current > 0 ? current - 1 : 0));
@@ -232,9 +234,9 @@ export default function Interview() {
 
   useEffect(() => {
     if (responses.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ interviewId, currentIndex, current_turn: currentTurn, max_turns: maxTurns, responses, secondsLeft }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ interviewId, currentIndex, current_turn: currentTurn, max_turns: maxTurns, responses }));
     }
-  }, [interviewId, currentIndex, currentTurn, maxTurns, responses, secondsLeft]);
+  }, [interviewId, currentIndex, currentTurn, maxTurns, responses]);
 
   const answeredCount = useMemo(
     () => responses.filter((item) => item.completed).length,
@@ -355,7 +357,7 @@ export default function Interview() {
         : item);
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         interviewId, currentIndex, current_turn: result.current_turn, max_turns: result.max_turns,
-        responses: savedResponses, secondsLeft,
+        responses: savedResponses,
       }));
 
       // Release per-answer recording only after advancement succeeds.
@@ -371,7 +373,12 @@ export default function Interview() {
         setResponses(savedResponses);
         setPhase('complete');
         localStorage.setItem(DURATION_KEY, String(INTERVIEW_SECONDS - secondsLeft));
-        localStorage.setItem('ai-interview-vision-metrics', JSON.stringify(visionMetricsRef.current || { eyeContact: 75 }));
+        // Only real camera measurements are saved. When the vision model never
+        // produced data, nothing is stored and the report omits the camera score
+        // instead of showing an invented value.
+        if (visionMetricsRef.current) {
+          localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
+        }
         streamRef.current?.getTracks().forEach((track) => track.stop());
         navigate('/interview-complete');
         return;
@@ -402,7 +409,7 @@ export default function Interview() {
         <Loader2 className="h-12 w-12 animate-spin text-tealish-600" />
         <h2 className="mt-6 text-2xl font-bold text-slate-900">Preparing Your AI Interview</h2>
         <p className="mt-2 text-slate-500">
-          Google Gemini is analyzing the {targetRole} job requirements and generating tailored technical interview questions...
+          Google Gemini is analyzing the {targetRole} job requirements and preparing your first adaptive question...
         </p>
       </div>
     );

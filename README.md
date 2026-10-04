@@ -66,12 +66,23 @@ python -m uvicorn main:app --app-dir backend --reload --port 8000
 
 Copy `.env.example` to `.env` for the frontend and `backend/.env.example` to `backend/.env` for the backend. Do not commit either real environment file.
 
+Check the running API at `http://localhost:8000/api/health`; it reports whether PostgreSQL is reachable and whether a Gemini key is configured.
+
+### Tests
+
+```sh
+npm test                                   # frontend (Vitest)
+python -m pytest backend                   # backend unit and API tests
+```
+
 ## Environment Variables
 
 Frontend:
 
 ```env
 VITE_API_BASE_URL=http://localhost:8000
+# Optional: VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+# VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID, VITE_FIREBASE_APP_ID
 ```
 
 Backend:
@@ -81,6 +92,12 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
 GEMINI_API_KEY=
 GEMINI_QUESTION_MODEL=gemini-flash-lite-latest
 GEMINI_EVALUATION_MODEL=gemini-flash-lite-latest
+# Optional, defaults shown
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_DIMENSIONS=768
+GEMINI_TIMEOUT_SECONDS=60
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+MAX_UPLOAD_MB=200
 ```
 
 ## Database
@@ -104,7 +121,9 @@ Follow-up controls prevent more than one consecutive follow-up. Arena XP, streak
 
 - LLM evaluation can vary and depends on Gemini availability; deterministic fallbacks preserve session integrity.
 - Camera engagement, face presence, approximate gaze direction, and head alignment are observable approximations. They do not measure confidence, honesty, personality, emotion, or employability.
-- Speech Fluency currently uses transcript/filler-word signals rather than full acoustic modelling.
+- Speech Fluency currently uses transcript/filler-word signals (averaged per answer) rather than full acoustic modelling.
+- When the camera model produces no data, Camera Engagement is omitted and the overall score is re-weighted over the other components; no value is assumed.
+- The API does not yet verify Firebase ID tokens, and uploaded answer videos are served from public URLs. Add authentication before any real deployment.
 - Active interview refresh recovery is limited; completed Arena results can be reloaded from persisted state.
 - The system supports coaching and self-practice, not hiring decisions.
 
@@ -116,15 +135,21 @@ Potential extensions include automatic speech-to-text, deeper acoustic analysis,
 
 ```text
 backend/
-  main.py              API endpoints
+  main.py              API endpoints and transaction handling
+  config.py            environment settings (loaded once)
+  adaptive.py          deterministic difficulty and follow-up policy
   adaptive_service.py  adaptive state and persistence
-  adaptive_questions.py fallback questions
+  adaptive_questions.py question validation and offline fallback questions
   arena.py             deterministic Arena rules
+  scoring.py           final-report scoring rules
+  nlp_evaluator.py     filler words and rubric retrieval
   gemini_service.py    Gemini and embedding integration
+  database.py          PostgreSQL connections
 src/
   pages/               Standard and Arena screens
   components/          reusable UI and camera engagement monitor
   services/            API and vision helpers
+  utils/               shared storage keys and journey helpers
 schema.sql             PostgreSQL schema and additive migrations
 docs/                  demo, live-test, viva, and submission guides
 ```

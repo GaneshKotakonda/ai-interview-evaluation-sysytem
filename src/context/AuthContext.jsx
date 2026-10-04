@@ -9,6 +9,12 @@ import {
 } from 'firebase/auth';
 import { auth } from '../firebase';
 
+// -------------------------------------------------------------
+// Firebase authentication state shared through React context.
+// `loading` stays true until Firebase reports the initial session, so
+// ProtectedRoute never redirects a signed-in user to /login on refresh.
+// -------------------------------------------------------------
+
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
@@ -24,6 +30,8 @@ export function AuthProvider({ children }) {
     return unsubscribe;
   }, []);
 
+  // Create the account, then store the display name and refresh the user
+  // object so the new name is visible immediately.
   const signup = async (fullName, email, password) => {
     const credential = await createUserWithEmailAndPassword(auth, email, password);
     await updateProfile(credential.user, { displayName: fullName });
@@ -44,6 +52,7 @@ export function AuthProvider({ children }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+// Hook for components; throws if used outside <AuthProvider>.
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {

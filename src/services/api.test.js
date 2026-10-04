@@ -102,4 +102,19 @@ describe('interview API contracts', () => {
       'https://api.example.test/api/interviews/user/firebase-user',
     );
   });
+
+  it('attaches HTTP status and server detail to failed requests', async () => {
+    fetch.mockResolvedValue({ ok: false, status: 409, json: () => Promise.resolve({ detail: 'Interview is no longer active.' }) });
+    const { api } = await import('./api');
+    const error = await api.submitAnswer('interview-id', { questionIndex: 1, questionText: 'Q', candidateAnswer: 'A' }).catch((e) => e);
+    expect(error.message).toBe('Failed to submit answer');
+    expect(error.status).toBe(409);
+    expect(error.detail).toBe('Interview is no longer active.');
+  });
+
+  it('URL-encodes interview ids in every interview path', async () => {
+    const { api } = await import('./api');
+    await api.getReport('a/b');
+    expect(fetch.mock.calls[0][0]).toBe('http://localhost:8000/api/interviews/a%2Fb/report');
+  });
 });

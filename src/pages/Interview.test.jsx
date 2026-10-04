@@ -134,5 +134,7 @@ it('completes all server-issued turns and saves the full journey without reusing
   expect(progress.responses[1].is_follow_up).toBe(true);
   expect(stopTrack).toHaveBeenCalled();
   expect(localStorage.getItem('ai-interview-duration')).not.toBeNull();
-  expect(localStorage.getItem('ai-interview-vision-metrics')).not.toBeNull();
+  // The mocked BehaviorMonitor never reports metrics, so no camera value may be
+  // invented (previously a fake { eyeContact: 75 } was stored here).
+  expect(localStorage.getItem('ai-interview-vision-metrics')).toBeNull();
 });

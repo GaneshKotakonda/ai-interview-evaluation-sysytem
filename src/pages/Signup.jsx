@@ -3,6 +3,10 @@ import { Eye, EyeOff, LoaderCircle, Mic } from 'lucide-react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
+// -------------------------------------------------------------
+// Account creation with client-side validation before calling Firebase.
+// -------------------------------------------------------------
+
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function friendlyFirebaseError(error) {

@@ -1,3 +1,7 @@
+// -------------------------------------------------------------
+// Labelled percentage bar; the fill width is clamped to 0..100%.
+// -------------------------------------------------------------
+
 export default function ProgressBar({ label, value, compact = false }) {
   return (
     <div>

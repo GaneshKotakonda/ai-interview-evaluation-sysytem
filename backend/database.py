@@ -1,85 +1,82 @@
-import os
+"""PostgreSQL connection helpers.
+
+Connections use ``RealDictCursor`` so every row is a dict
+(``row["role_title"]``) rather than a tuple (``row[1]``). Callers own the
+connection: commit or roll back, then close it.
+"""
+import logging
 import urllib.parse
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
+
+import config
+
+logger = logging.getLogger(__name__)
+
 
 # -------------------------------------------------------------
-# BLOCK 1: Load Environment Variables
+# BLOCK 1: Connection-string sanitising
 # -------------------------------------------------------------
-# Resolve .env path relative to this backend file, and fallback to root
-env_path = os.path.join(os.path.dirname(__file__), ".env")
-if os.path.exists(env_path):
-    load_dotenv(env_path)
-load_dotenv()
-
 def get_safe_db_url(url: str) -> str:
-    """
-    Safely encodes special characters (like '@') in the password portion
-    of a postgres connection string to prevent host resolution errors.
+    """Percent-encode an ``@`` inside the password of a postgres URL.
+
+    ``postgresql://user:p@ss@host/db`` would otherwise be parsed with
+    ``ss@host`` as the host name. Only the password is re-encoded; URLs with
+    a single ``@`` are returned unchanged.
     """
     if not url:
         return url
     try:
-        if url.count('@') > 1 and '://' in url:
-            prefix, remainder = url.split('://', 1)
-            last_at_index = remainder.rfind('@')
+        if url.count("@") > 1 and "://" in url:
+            prefix, remainder = url.split("://", 1)
+            last_at_index = remainder.rfind("@")
             credentials = remainder[:last_at_index]
             host_and_path = remainder[last_at_index + 1:]
-            if ':' in credentials:
-                user, pwd = credentials.split(':', 1)
+            if ":" in credentials:
+                user, pwd = credentials.split(":", 1)
                 safe_pwd = urllib.parse.quote_plus(pwd)
                 return f"{prefix}://{user}:{safe_pwd}@{host_and_path}"
     except Exception:
+        # A malformed URL is passed through; psycopg2 reports the real error.
         pass
     return url
 
-DATABASE_URL = get_safe_db_url(os.getenv("DATABASE_URL"))
+
+DATABASE_URL = get_safe_db_url(config.DATABASE_URL)
 
 
 # -------------------------------------------------------------
-# BLOCK 2: Database Connection Function
+# BLOCK 2: Open a connection
 # -------------------------------------------------------------
-# This function opens a connection to the PostgreSQL database.
-# We pass cursor_factory=RealDictCursor so that query results
-# are returned as Python dictionaries (e.g. row['role_title'])
-# instead of plain tuples (e.g. row[1]).
 def get_db_connection():
-    """
-    Establishes and returns a connection to the PostgreSQL database.
-    Remember to close the connection once the query is completed.
-    """
-    # Re-check env in case it was updated during runtime
-    env_file = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_file):
-        load_dotenv(env_file)
-    load_dotenv()
+    """Open and return a new PostgreSQL connection with dict rows.
 
-    db_url = get_safe_db_url(os.getenv("DATABASE_URL") or DATABASE_URL)
-    if not db_url:
-        raise ValueError("DATABASE_URL is not set in backend/.env file.")
-    
-    conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
-    return conn
+    Raises ``ValueError`` when DATABASE_URL is not configured.
+    """
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set. Add it to backend/.env.")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
 # -------------------------------------------------------------
-# BLOCK 3: Database Connection Test Function
+# BLOCK 3: Startup health check
 # -------------------------------------------------------------
-# Used during server startup to verify that PostgreSQL is running
-# and the credentials (password/port) are working correctly.
-def test_db_connection():
-    """
-    Tests if PostgreSQL is reachable and prints the database version.
+def test_db_connection() -> bool:
+    """Log the PostgreSQL version; return False instead of raising on failure.
+
+    Used at server startup so a missing database is reported clearly while
+    the API process still starts (endpoints then fail with HTTP 500).
     """
     try:
         conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT version();")
-            db_version = cur.fetchone()
-            print(f"[DB CONNECTED] PostgreSQL Version: {db_version['version']}")
-        conn.close()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT version();")
+                logger.info("Connected to PostgreSQL: %s", cur.fetchone()["version"])
+        finally:
+            conn.close()
         return True
     except Exception as error:
-        print(f"[DB ERROR] Could not connect to PostgreSQL: {error}")
+        logger.error("Could not connect to PostgreSQL: %s", error)
         return False

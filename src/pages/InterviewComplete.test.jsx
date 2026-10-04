@@ -59,3 +59,12 @@ it('counts saved adaptive turns and retries completion without enabling a failed
   fireEvent.click(retry);
   await waitFor(() => expect(screen.getByRole('button', { name: 'View Evaluation Report' })).toBeEnabled());
 });
+it('sends no invented camera value when the vision model produced no data', async () => {
+  localStorage.clear();
+  localStorage.setItem('current-interview-id', 'interview-id');
+  completeInterview.mockReset();
+  completeInterview.mockResolvedValue({ interview_id: 'interview-id', overall_score: 70 });
+  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><InterviewComplete /></MemoryRouter>);
+  await waitFor(() => expect(completeInterview).toHaveBeenCalledWith('interview-id', {}, 0));
+  expect(screen.getByText(/Not measured/)).toBeInTheDocument();
+});

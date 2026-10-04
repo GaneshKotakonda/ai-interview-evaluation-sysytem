@@ -2,6 +2,12 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LoaderCircle } from 'lucide-react';
 
+// -------------------------------------------------------------
+// Route guard: shows a loader while Firebase restores the session, then
+// either renders the protected routes or redirects to /login, remembering
+// the page the user asked for.
+// -------------------------------------------------------------
+
 export default function ProtectedRoute() {
   const { user, loading } = useAuth();
   const location = useLocation();

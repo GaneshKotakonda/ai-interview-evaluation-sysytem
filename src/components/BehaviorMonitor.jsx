@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Eye, ScanFace, Users, Activity } from 'lucide-react';
 import { analyzeFaceResult, createVisionStats, getFaceLandmarker, metricsSnapshot } from '../services/visionAnalyzer';
 
+// -------------------------------------------------------------
+// Camera engagement monitor (MediaPipe Face Landmarker, in the browser)
+// -------------------------------------------------------------
+// Samples the live <video> about 5 times a second, accumulates how long a
+// face was present / looking at the screen / facing the camera, and reports
+// a snapshot to the parent through onMetricsChange. No video leaves the
+// browser from this component; only the aggregated percentages are used.
 const SAMPLE_INTERVAL_MS = 200;
 
 function Metric({ icon: Icon, label, value }) {
@@ -22,6 +29,7 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
   const statsRef = useRef(createVisionStats());
   const previousTimeRef = useRef(null);
   const animationRef = useRef(null);
+  const timeoutRef = useRef(null);
   const runningRef = useRef(false);
   const previousMultipleFaceRef = useRef(false);
   const onMetricsChangeRef = useRef(onMetricsChange);
@@ -81,7 +89,8 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
             setStatus(error?.message || 'Vision analysis error');
           }
 
-          window.setTimeout(() => {
+          // Throttle: wait SAMPLE_INTERVAL_MS, then sync with the next frame.
+          timeoutRef.current = window.setTimeout(() => {
             animationRef.current = requestAnimationFrame(loop);
           }, SAMPLE_INTERVAL_MS);
         };
@@ -97,6 +106,7 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
     return () => {
       cancelled = true;
       runningRef.current = false;
+      if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
   }, [active, videoRef]);

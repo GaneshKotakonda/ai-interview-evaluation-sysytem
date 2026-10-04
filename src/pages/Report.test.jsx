@@ -27,3 +27,19 @@ it('does not show a journey saved for another interview', async () => {
   await screen.findByText('Interview Performance Report');
   expect(screen.queryByText('Old question')).not.toBeInTheDocument();
 });
+it('opens a saved report by ?id= using server turns and omits missing camera data', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'past', overall_score: 77, role_title: 'Data Engineer',
+    scores: [{ label: 'Answer Quality', value: 80 }, { label: 'Camera Engagement', value: null }],
+    turns: [{ index: 1, question: 'Explain partitioning', difficulty: 'expert', evaluation: { answer_quality_score: 70, evaluation_source: 'fallback' }, adaptation: { reason: 'Keep level' } }],
+  });
+  localStorage.setItem('current-interview-id', 'current');
+  render(<MemoryRouter initialEntries={['/report?id=past']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  expect(await screen.findByText('Explain partitioning')).toBeInTheDocument();
+  expect(api.getReport).toHaveBeenLastCalledWith('past');
+  expect(screen.getByText(/for Data Engineer/)).toBeInTheDocument();
+  expect(screen.getByText('Adaptation: Keep level')).toBeInTheDocument();
+  expect(screen.getByText(/Approximate score/)).toBeInTheDocument();
+  expect(screen.queryByText('Camera Engagement')).not.toBeInTheDocument();
+});

@@ -2,6 +2,12 @@ import { useState } from 'react';
 import { ArrowRight, Gamepad2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
+// -------------------------------------------------------------
+// Arena setup: choose a practice area (or a custom topic) and start.
+// The choice is passed to /arena/play through router state, so refreshing
+// the play page returns here instead of silently starting a new game.
+// -------------------------------------------------------------
+
 const areas = [
   { label: 'Software Engineer', role_title: 'Software Engineer', topic: 'Software Engineering' },
   { label: 'Frontend / React', role_title: 'Frontend Developer', topic: 'React' },

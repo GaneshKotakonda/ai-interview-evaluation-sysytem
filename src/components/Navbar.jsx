@@ -1,6 +1,10 @@
 import { Menu, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
+// -------------------------------------------------------------
+// Top bar: mobile menu button and the signed-in user's name.
+// -------------------------------------------------------------
+
 export default function Navbar({ onOpenSidebar }) {
   const { user } = useAuth();
   return (

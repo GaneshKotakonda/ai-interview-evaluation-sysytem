@@ -12,6 +12,11 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
+import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
+
+// The backend stores role titles in a VARCHAR(100) column.
+const ROLE_TITLE_MAX = 100;
+const JOB_DESCRIPTION_MAX = 4000; // the backend uses at most 4000 characters
 
 // -------------------------------------------------------------
 // BLOCK 1: Preset Job Descriptions for Quick Selection
@@ -63,10 +68,10 @@ export default function Readiness() {
   // -------------------------------------------------------------
   // Reads any previously selected role/JD from local storage, defaulting to Software Engineer.
   const [roleTitle, setRoleTitle] = useState(
-    () => localStorage.getItem('target-role-title') || 'Software Engineer'
+    () => localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer'
   );
   const [jobDescription, setJobDescription] = useState(
-    () => localStorage.getItem('target-job-description') || ''
+    () => localStorage.getItem(STORAGE_KEYS.jobDescription) || ''
   );
 
   // -------------------------------------------------------------
@@ -148,13 +153,12 @@ export default function Readiness() {
     stopStream();
 
     // Persist target role and custom job description for Interview.jsx
-    localStorage.setItem('target-role-title', roleTitle.trim() || 'Software Engineer');
-    localStorage.setItem('target-job-description', jobDescription.trim());
+    localStorage.setItem(STORAGE_KEYS.roleTitle, roleTitle.trim() || 'Software Engineer');
+    localStorage.setItem(STORAGE_KEYS.jobDescription, jobDescription.trim());
 
     // Reset previous interview progress so fresh questions generate
-    localStorage.removeItem('ai-interview-progress');
-    localStorage.removeItem('ai-interview-duration');
-    localStorage.removeItem('current-interview-id');
+    clearInterviewProgress();
+    localStorage.removeItem(STORAGE_KEYS.interviewId);
 
     navigate('/interview');
   };
@@ -214,6 +218,7 @@ export default function Readiness() {
                 </label>
                 <input
                   type="text"
+                  maxLength={ROLE_TITLE_MAX}
                   value={roleTitle}
                   onChange={(e) => setRoleTitle(e.target.value)}
                   placeholder="e.g. Full Stack Developer, Data Scientist, DevOps Specialist"
@@ -255,6 +260,7 @@ export default function Readiness() {
                 </div>
                 <textarea
                   rows="4"
+                  maxLength={JOB_DESCRIPTION_MAX}
                   value={jobDescription}
                   onChange={(e) => setJobDescription(e.target.value)}
                   placeholder="Paste the job description, required technologies, framework stack, or key qualifications here... AI will formulate interview questions tailored to these exact requirements."

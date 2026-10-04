@@ -1,10 +1,12 @@
+"""Lightweight NLP signals: filler-word counting and rubric retrieval."""
 import re
 
 # -------------------------------------------------------------
-# BLOCK 1: List of Common Spoken Filler Words
+# BLOCK 1: Common spoken filler words
 # -------------------------------------------------------------
-# In professional interviews, candidates frequently use filler words
-# when nervous or stalling. We track these to measure communication quality.
+# Nervous or stalling speakers use these often; the count feeds the
+# communication and speech-fluency scores. Note that legitimate uses
+# ("I like Python") are also counted, so the metric is an approximation.
 COMMON_FILLER_WORDS = [
     "um",
     "uh",
@@ -20,59 +22,55 @@ COMMON_FILLER_WORDS = [
     "kind of"
 ]
 
+# Compiled once at import. \b word boundaries match "like" but not the
+# "like" inside "likely" or "dislike".
+_FILLER_PATTERNS = [
+    (word, re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE))
+    for word in COMMON_FILLER_WORDS
+]
+
 
 # -------------------------------------------------------------
-# BLOCK 2: NLP Filler Word Counter
+# BLOCK 2: Filler-word counter
 # -------------------------------------------------------------
-# Uses regular expressions with word boundary checks (\b) so that
-# the word "like" is detected, but not inside words like "likely" or "dislike".
 def count_filler_words(text: str) -> dict:
-    """
-    Scans candidate text and returns:
-    1. 'total_count': Total number of filler occurrences
-    2. 'breakdown': A dictionary showing how many times each filler word was spoken
+    """Count filler words in ``text``.
+
+    Returns ``{"total_count": int, "breakdown": {word: count}}``; words that
+    do not occur are omitted from the breakdown.
     """
     if not text or not text.strip():
         return {"total_count": 0, "breakdown": {}}
 
     breakdown = {}
-    total_count = 0
-
-    for word in COMMON_FILLER_WORDS:
-        # \b ensures we match the whole word, not substrings
-        pattern = r'\b' + re.escape(word) + r'\b'
-        matches = re.findall(pattern, text, flags=re.IGNORECASE)
-        count = len(matches)
-        if count > 0:
+    for word, pattern in _FILLER_PATTERNS:
+        count = len(pattern.findall(text))
+        if count:
             breakdown[word] = count
-            total_count += count
 
-    return {
-        "total_count": total_count,
-        "breakdown": breakdown
-    }
+    return {"total_count": sum(breakdown.values()), "breakdown": breakdown}
 
 
 # -------------------------------------------------------------
-# BLOCK 3: Vector Similarity Search using PostgreSQL Function
+# BLOCK 3: Rubric retrieval by cosine similarity (in PostgreSQL)
 # -------------------------------------------------------------
-# This function queries the 'question_rubrics' table.
-# It calls the custom 'cosine_similarity(embedding, candidate_embedding)'
-# function we created in PostgreSQL to find which ideal rubric concepts
-# match closest to what the candidate said.
+# Calls the cosine_similarity(FLOAT8[], FLOAT8[]) SQL function defined in
+# schema.sql to rank this question's rubric points against the answer.
 def retrieve_top_rubric_matches(conn, interview_id: str, question_index: int, candidate_vector: list[float]):
+    """Return ``(top_rubric_texts, best_similarity)`` for one question.
+
+    At most three rubric points are returned, best first. An empty vector or
+    a question without rubric rows yields ``([], 0.0)``.
     """
-    Executes Cosine Similarity in PostgreSQL.
-    Retrieves the top matching rubric points and the highest similarity score.
-    Returns: (list_of_rubric_texts, highest_similarity_score)
-    """
-    if not candidate_vector or len(candidate_vector) == 0:
+    if not candidate_vector:
         return [], 0.0
 
+    # The explicit ::float8[] cast keeps function resolution unambiguous;
+    # psycopg2 otherwise sends a Python float list as numeric[].
     query = """
-        SELECT 
+        SELECT
             ideal_concept_chunk,
-            cosine_similarity(embedding, %s) AS similarity
+            cosine_similarity(embedding, %s::float8[]) AS similarity
         FROM question_rubrics
         WHERE interview_id = %s AND question_index = %s
         ORDER BY similarity DESC
@@ -87,19 +85,20 @@ def retrieve_top_rubric_matches(conn, interview_id: str, question_index: int, ca
         return [], 0.0
 
     rubric_points = [row["ideal_concept_chunk"] for row in rows]
-    # Similarity will be a float between 0.0 and 1.0
+    # Similarity is in [-1, 1]; for text embeddings it is in practice 0..1.
     highest_similarity = max(float(row["similarity"]) for row in rows)
-
     return rubric_points, highest_similarity
 
 
 # -------------------------------------------------------------
-# BLOCK 4: Candidate Transcript Evaluation & Quality Scoring
+# BLOCK 4: Stand-alone transcript scoring (used by the unit tests)
 # -------------------------------------------------------------
 def evaluate_candidate_transcript(candidate_roll_no: str, transcript: str, similarity_score: float) -> dict:
-    """
-    Evaluates candidate transcript, verifies input integrity, counts filler words,
-    and computes voice confidence and answer quality scores.
+    """Score a transcript without the database or Gemini.
+
+    Validates the inputs, counts filler words and derives a voice-confidence
+    score (95 minus 2 per filler, clamped to 40..100) and an answer-quality
+    score (similarity as a percentage).
     """
     if not candidate_roll_no or not candidate_roll_no.strip():
         raise ValueError("Candidate roll number cannot be empty")
@@ -110,7 +109,6 @@ def evaluate_candidate_transcript(candidate_roll_no: str, transcript: str, simil
 
     filler_stats = count_filler_words(transcript)
     total_fillers = filler_stats["total_count"]
-    # Baseline voice confidence 95 minus 2 points per filler word, clamped to [40, 100]
     voice_confidence = max(40, min(100, 95 - (total_fillers * 2)))
     answer_quality = round(similarity_score * 100)
 
@@ -121,4 +119,3 @@ def evaluate_candidate_transcript(candidate_roll_no: str, transcript: str, simil
         "voice_confidence_score": voice_confidence,
         "answer_quality_score": answer_quality,
     }
-
