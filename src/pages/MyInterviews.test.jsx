@@ -37,11 +37,16 @@ it('lists every session including incomplete ones, newest first', async () => {
 it('filters by mode, status and search, and sorts by score', async () => {
   renderPage();
   await screen.findByText('Data Engineer');
-  fireEvent.change(screen.getByLabelText('Filter by mode'), { target: { value: 'standard' } });
+  const pick = (group, option) => fireEvent.click(
+    within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name: option }),
+  );
+  pick('Filter by mode', 'Standard');
   expect(rowNames()).toHaveLength(2);
-  fireEvent.change(screen.getByLabelText('Filter by status'), { target: { value: 'completed' } });
+  pick('Filter by status', 'Completed');
   expect(rowNames()).toEqual(['Backend EngineerStandard']);
-  fireEvent.change(screen.getByLabelText('Filter by mode'), { target: { value: 'all' } });
+  expect(within(screen.getByRole('radiogroup', { name: 'Filter by status' })).getByRole('radio', { name: 'Completed' }))
+    .toHaveAttribute('aria-checked', 'true');
+  pick('Filter by mode', 'All');
   fireEvent.change(screen.getByLabelText('Sort interviews'), { target: { value: 'score' } });
   expect(rowNames()[0]).toBe('Frontend DeveloperArena');
   fireEvent.change(screen.getByPlaceholderText('Search by role'), { target: { value: 'nothing' } });

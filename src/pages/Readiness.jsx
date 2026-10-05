@@ -1,17 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ArrowRight,
   Camera,
   Lightbulb,
   Mic,
   RefreshCw,
   Wifi,
-  ArrowRight,
-  Briefcase,
-  FileText,
-  Sparkles,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
+import { Badge, FlowSteps, Notice, PageHeader, Panel, SectionTitle } from '../components/ui';
 import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
 
 // The backend stores role titles in a VARCHAR(100) column.
@@ -172,207 +170,142 @@ export default function Readiness() {
   // -------------------------------------------------------------
   // BLOCK 6: Render Component UI
   // -------------------------------------------------------------
+  const checks = [
+    { icon: Camera, label: 'Camera', status: cameraReady ? 'Ready' : 'Permission Required', ready: cameraReady, helper: 'Video input for engagement tracking' },
+    { icon: Mic, label: 'Microphone', status: microphoneReady ? 'Ready' : 'Permission Required', ready: microphoneReady, helper: 'Audio input for spoken answers' },
+    { icon: Wifi, label: 'Network', status: networkReady ? 'Connected' : 'Offline', ready: networkReady, helper: 'Browser network connection' },
+    { icon: Lightbulb, label: 'Environment', status: cameraReady ? 'Good' : 'Waiting', ready: cameraReady, helper: 'Even light on your face' },
+  ];
+  const readyCount = checks.filter((check) => check.ready).length;
+
   return (
-    <div className="mx-auto max-w-6xl space-y-7">
-      {/* Header Banner */}
-      <div>
-        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-tealish-600">
-          Interview Preparation
-        </p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">
-          Customize Your Interview & Check Readiness
-        </h1>
-        <p className="mt-2 text-slate-500">
-          Configure the target job role, paste job description requirements, and verify your camera and mic setup.
-        </p>
-      </div>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <FlowSteps current={0} />
+      <PageHeader
+        title="Set up your interview"
+        description="Tell us the role you are preparing for, then check your camera and microphone. Questions adapt to this role as you answer."
+      />
 
-      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="space-y-6">
-          {/* Target Role & Job Description Configuration Card */}
-          <section className="card p-6 sm:p-7">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-5">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-tealish-50 p-2.5 text-tealish-600">
-                  <Briefcase className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="font-bold text-slate-900">Target Role & Job Description</h2>
-                  <p className="text-xs text-slate-500">
-                    Gemini will generate adaptive questions for this role and its stated requirements.
-                  </p>
-                </div>
-              </div>
-              {jobDescription.trim() && (
-                <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 sm:inline-flex">
-                  <Sparkles className="h-3.5 w-3.5" /> JD Tailored
-                </span>
-              )}
-            </div>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+        {/* Target role and job description */}
+        <Panel i={1} className="p-6 sm:p-7">
+          <SectionTitle
+            title="Target role"
+            description="Gemini writes each question for this role and the requirements you paste."
+            action={jobDescription.trim() && <Badge tone="ink">Tailored to JD</Badge>}
+          />
 
-            <div className="mt-6 space-y-5">
-              {/* Role Title Input */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600">
-                  Target Job Title
-                </label>
-                <input
-                  type="text"
-                  maxLength={ROLE_TITLE_MAX}
-                  value={roleTitle}
-                  onChange={(e) => setRoleTitle(e.target.value)}
-                  placeholder="e.g. Full Stack Developer, Data Scientist, DevOps Specialist"
-                  className="input-field mt-2"
-                />
-              </div>
-
-              {/* Quick Template Presets */}
-              <div>
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Quick Role Templates:
-                </span>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {JOB_PRESETS.map((preset) => (
+          <div className="mt-7 space-y-7">
+            <div>
+              <label htmlFor="role-title" className="field-label">Job title</label>
+              <input
+                id="role-title"
+                type="text"
+                maxLength={ROLE_TITLE_MAX}
+                value={roleTitle}
+                onChange={(e) => setRoleTitle(e.target.value)}
+                placeholder="e.g. Full Stack Developer, Data Scientist"
+                className="input-field !py-3 !text-base"
+              />
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="mr-1 text-xs text-ink-3">Templates</span>
+                {JOB_PRESETS.map((preset) => {
+                  const active = roleTitle === preset.role;
+                  return (
                     <button
                       key={preset.label}
                       type="button"
                       onClick={() => applyPreset(preset)}
-                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                        roleTitle === preset.role
-                          ? 'border-navy-800 bg-navy-900 text-white shadow-sm'
-                          : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100'
+                      aria-pressed={active}
+                      className={`rounded-full border px-3 py-1 text-[13px] transition duration-200 ${
+                        active
+                          ? 'border-ink bg-ink text-paper'
+                          : 'border-line-strong text-ink-2 hover:border-ink-3 hover:text-ink'
                       }`}
                     >
                       {preset.label}
                     </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Job Description Textarea */}
-              <div>
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-600">
-                    <FileText className="h-4 w-4 text-slate-400" />
-                    Job Description & Responsibilities (Optional)
-                  </label>
-                  <span className="text-xs text-slate-400">{jobDescription.length} characters</span>
-                </div>
-                <textarea
-                  rows="4"
-                  maxLength={JOB_DESCRIPTION_MAX}
-                  value={jobDescription}
-                  onChange={(e) => setJobDescription(e.target.value)}
-                  placeholder="Paste the job description, required technologies, framework stack, or key qualifications here... AI will formulate interview questions tailored to these exact requirements."
-                  className="input-field mt-2 resize-y leading-6"
-                />
-                <p className="mt-1.5 text-xs text-slate-400">
-                  Leave blank to use the standard industry rubric for the selected job title.
-                </p>
+                  );
+                })}
               </div>
             </div>
-          </section>
 
-          {/* Camera Video Preview Card */}
-          <section className="card overflow-hidden">
-            <div className="border-b border-slate-100 px-6 py-5">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-bold text-slate-900">Camera Preview</h2>
-                  <p className="mt-1 text-sm text-slate-500">Your video remains private and local to your browser.</p>
-                </div>
-                <button onClick={runDeviceCheck} disabled={checking} className="secondary-btn !px-3 !py-2">
-                  <RefreshCw className={`h-4 w-4 ${checking ? 'animate-spin' : ''}`} /> Recheck
-                </button>
+            <div>
+              <div className="flex items-baseline justify-between">
+                <label htmlFor="job-description" className="field-label">
+                  Job description <span className="font-normal text-ink-3">(optional)</span>
+                </label>
+                <span className="num font-mono text-xs text-ink-4">{jobDescription.length} / {JOB_DESCRIPTION_MAX}</span>
               </div>
-            </div>
-            <div className="bg-slate-950 p-3 sm:p-5">
-              <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">
-                <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-                {!cameraReady && (
-                  <div className="absolute inset-0 grid place-items-center p-6 text-center text-slate-300">
-                    <div>
-                      <Camera className="mx-auto h-8 w-8" />
-                      <p className="mt-3 text-sm">
-                        {checking ? 'Verifying camera access...' : 'Camera preview unavailable'}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            {permissionError && (
-              <div className="border-t border-amber-200 bg-amber-50 px-6 py-4 text-sm text-amber-800">
-                {permissionError}
-              </div>
-            )}
-          </section>
-        </div>
-
-        {/* Right Aside: Readiness Verification & Start Button */}
-        <section className="space-y-4">
-          <div className="card p-5">
-            <h2 className="font-bold text-slate-900">Readiness Checks</h2>
-            <p className="mt-1 text-sm text-slate-500">All required inputs must be verified before continuing.</p>
-            <div className="mt-5 space-y-3">
-              <DeviceCheck
-                icon={Camera}
-                label="Camera"
-                status={cameraReady ? 'Ready' : 'Permission Required'}
-                ready={cameraReady}
-                helper="Video input for interview tracking"
+              <textarea
+                id="job-description"
+                rows="9"
+                maxLength={JOB_DESCRIPTION_MAX}
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+                placeholder="Paste the responsibilities, required stack or key qualifications. Questions will target these requirements."
+                className="input-field resize-y leading-relaxed"
               />
-              <DeviceCheck
-                icon={Mic}
-                label="Microphone"
-                status={microphoneReady ? 'Ready' : 'Permission Required'}
-                ready={microphoneReady}
-                helper="Audio input for spoken answers"
-              />
-              <DeviceCheck
-                icon={Wifi}
-                label="Network"
-                status={networkReady ? 'Connected' : 'Offline'}
-                ready={networkReady}
-                helper="Browser network connection"
-              />
-              <DeviceCheck
-                icon={Lightbulb}
-                label="Environment"
-                status={cameraReady ? 'Good' : 'Waiting'}
-                ready={cameraReady}
-                helper="Adequate face lighting"
-              />
+              <p className="mt-2 text-xs text-ink-3">Leave blank to use a standard rubric for the job title.</p>
             </div>
           </div>
+        </Panel>
 
-          {/* Consent & Begin Button */}
-          <div className="card p-5">
+        {/* Pre-flight: preview, checks, consent */}
+        <div className="space-y-5 lg:sticky lg:top-24 lg:self-start">
+          <Panel i={2} className="overflow-hidden">
+            <div className="relative aspect-video bg-ink">
+              <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+              {!cameraReady && (
+                <div className="absolute inset-0 grid place-items-center p-6 text-center text-paper/60">
+                  <div>
+                    <Camera className="mx-auto h-6 w-6" strokeWidth={1.5} />
+                    <p className="mt-2 text-[13px]">{checking ? 'Checking camera access…' : 'Camera preview unavailable'}</p>
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={runDeviceCheck}
+                disabled={checking}
+                className="btn absolute right-3 top-3 bg-ink/60 !px-3 !py-1.5 text-xs text-paper backdrop-blur hover:bg-ink/80"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${checking ? 'animate-spin' : ''}`} /> Recheck
+              </button>
+            </div>
+            <div className="px-5 pb-2 pt-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[15px] font-semibold text-ink">Readiness checks</h2>
+                <span className="num font-mono text-xs text-ink-3">{readyCount}/{checks.length}</span>
+              </div>
+              <div className="mt-1 divide-y divide-line">
+                {checks.map((check) => <DeviceCheck key={check.label} {...check} />)}
+              </div>
+            </div>
+            {permissionError && <div className="px-5 pb-4"><Notice tone="warn">{permissionError}</Notice></div>}
+          </Panel>
+
+          <Panel i={3} className="p-5">
             <label className="flex cursor-pointer items-start gap-3">
               <input
                 type="checkbox"
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300 text-navy-800 focus:ring-navy-600"
+                className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
               />
-              <span className="text-sm leading-6 text-slate-700">
+              <span className="text-[13px] leading-relaxed text-ink-2">
                 I consent to audio, video, and observable camera-engagement analysis for this practice interview.
               </span>
             </label>
-            <button
-              onClick={handleContinue}
-              disabled={!canContinue}
-              className="primary-btn mt-5 w-full justify-center"
-            >
+            <button onClick={handleContinue} disabled={!canContinue} className="primary-btn mt-5 w-full !py-3">
               Continue to Interview <ArrowRight className="h-4 w-4" />
             </button>
             {!canContinue && (
-              <p className="mt-3 text-center text-xs text-slate-400">
-                Camera, microphone, network, and consent checkbox are required to start.
+              <p className="mt-3 text-center text-xs text-ink-3">
+                Camera, microphone, network and consent are required to start.
               </p>
             )}
-          </div>
-        </section>
+          </Panel>
+        </div>
       </div>
     </div>
   );

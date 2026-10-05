@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  AlertCircle,
   ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
   FileText,
-  LoaderCircle,
   Minus,
-  TrendingUp,
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ProgressBar from '../components/ProgressBar';
+import {
+  CountUp, EmptyState, LoadingBlock, Notice, PageHeader, Panel, SectionTitle,
+} from '../components/ui';
 import { api } from '../services/api';
 import { clearInterviewProgress } from '../utils/interviewJourney';
 import { formatDate, formatDuration } from '../utils/interviewFormat';
@@ -20,10 +20,10 @@ import { formatDate, formatDuration } from '../utils/interviewFormat';
 // BLOCK 1: Helpers
 // -------------------------------------------------------------
 const COMPONENTS = [
-  { key: 'answer_quality_score', label: 'Answer Quality' },
-  { key: 'communication_score', label: 'Communication' },
-  { key: 'speech_fluency_score', label: 'Speech Fluency' },
-  { key: 'camera_engagement_score', label: 'Camera Engagement' },
+  { key: 'answer_quality_score', label: 'Answer Quality', short: 'Answer' },
+  { key: 'communication_score', label: 'Communication', short: 'Comms' },
+  { key: 'speech_fluency_score', label: 'Speech Fluency', short: 'Fluency' },
+  { key: 'camera_engagement_score', label: 'Camera Engagement', short: 'Camera' },
 ];
 
 const hasValue = (value) => value !== null && value !== undefined;
@@ -47,7 +47,7 @@ function topItems(reports, key, limit = 4) {
 // -------------------------------------------------------------
 // BLOCK 2: Overall score trend (single series, 0–100)
 // -------------------------------------------------------------
-const CHART = { width: 640, height: 220, left: 36, right: 16, top: 16, bottom: 28 };
+const CHART = { width: 640, height: 240, left: 34, right: 18, top: 18, bottom: 30 };
 
 function ScoreTrendChart({ points }) {
   const [hover, setHover] = useState(null);
@@ -56,6 +56,9 @@ function ScoreTrendChart({ points }) {
   const x = (index) => CHART.left + (points.length === 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
   const y = (value) => CHART.top + plotHeight - (value / 100) * plotHeight;
   const path = points.map((point, index) => `${index ? 'L' : 'M'}${x(index)},${y(point.score)}`).join(' ');
+  const area = points.length > 1
+    ? `${path} L${x(points.length - 1)},${y(0)} L${x(0)},${y(0)} Z`
+    : '';
   const active = hover === null ? null : points[hover];
 
   return (
@@ -67,19 +70,26 @@ function ScoreTrendChart({ points }) {
         aria-label={`Overall score across ${points.length} reports, from ${points[0].score} to ${points[points.length - 1].score}`}
         onMouseLeave={() => setHover(null)}
       >
+        <defs>
+          <linearGradient id="trend-fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#171611" stopOpacity="0.09" />
+            <stop offset="100%" stopColor="#171611" stopOpacity="0" />
+          </linearGradient>
+        </defs>
         {[0, 25, 50, 75, 100].map((tick) => (
           <g key={tick}>
-            <line x1={CHART.left} x2={CHART.width - CHART.right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" strokeWidth="1" />
-            <text x={CHART.left - 8} y={y(tick)} dy="0.32em" textAnchor="end" fontSize="11" fill="#94a3b8">{tick}</text>
+            <line x1={CHART.left} x2={CHART.width - CHART.right} y1={y(tick)} y2={y(tick)} stroke="#e5e2da" strokeWidth="1" strokeDasharray={tick === 0 ? undefined : '2 4'} />
+            <text x={CHART.left - 10} y={y(tick)} dy="0.32em" textAnchor="end" fontSize="11" fill="#868176" fontFamily="Geist Mono, monospace">{tick}</text>
           </g>
         ))}
+        {area && <path d={area} fill="url(#trend-fill)" className="fade-in" />}
         {active && (
-          <line x1={x(hover)} x2={x(hover)} y1={CHART.top} y2={CHART.top + plotHeight} stroke="#cbd5e1" strokeWidth="1" />
+          <line x1={x(hover)} x2={x(hover)} y1={CHART.top} y2={CHART.top + plotHeight} stroke="#b3ada1" strokeWidth="1" />
         )}
-        <path d={path} fill="none" stroke="#14a891" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={path} fill="none" stroke="#171611" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" pathLength="100" className="draw" style={{ '--len': 100 }} />
         {points.map((point, index) => (
           <g key={point.id}>
-            <circle cx={x(index)} cy={y(point.score)} r={hover === index ? 5 : 4} fill="#14a891" stroke="#ffffff" strokeWidth="2" />
+            <circle cx={x(index)} cy={y(point.score)} r={hover === index ? 5.5 : 4} fill="#171611" stroke="#ffffff" strokeWidth="2" className="transition-all duration-200" />
             {/* Hit target wider than the marker. */}
             <rect
               x={x(index) - Math.max(12, plotWidth / points.length / 2)}
@@ -88,25 +98,24 @@ function ScoreTrendChart({ points }) {
               height={plotHeight}
               fill="transparent"
               onMouseEnter={() => setHover(index)}
-              onFocus={() => setHover(index)}
             />
           </g>
         ))}
         {points.length > 1 && (
           <>
-            <text x={x(0)} y={CHART.height - 8} textAnchor="start" fontSize="11" fill="#94a3b8">{points[0].label}</text>
-            <text x={x(points.length - 1)} y={CHART.height - 8} textAnchor="end" fontSize="11" fill="#94a3b8">{points[points.length - 1].label}</text>
+            <text x={x(0)} y={CHART.height - 8} textAnchor="start" fontSize="11" fill="#868176">{points[0].label}</text>
+            <text x={x(points.length - 1)} y={CHART.height - 8} textAnchor="end" fontSize="11" fill="#868176">{points[points.length - 1].label}</text>
           </>
         )}
       </svg>
       {active && (
         <div
-          className="pointer-events-none absolute -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-card"
+          className="scale-in pointer-events-none absolute -translate-x-1/2 rounded-control border border-line bg-surface px-3 py-2 text-xs shadow-lift"
           style={{ left: `${(x(hover) / CHART.width) * 100}%`, top: 0 }}
         >
-          <p className="font-semibold text-slate-900">{active.score}/100</p>
-          <p className="text-slate-500">{active.role}</p>
-          <p className="text-slate-400">{active.label}</p>
+          <p className="num font-mono text-sm text-ink">{active.score}/100</p>
+          <p className="mt-0.5 text-ink-2">{active.role}</p>
+          <p className="text-ink-3">{active.label}</p>
         </div>
       )}
     </div>
@@ -114,12 +123,12 @@ function ScoreTrendChart({ points }) {
 }
 
 function Change({ latest, previous }) {
-  if (!hasValue(latest) || !hasValue(previous)) return <span className="text-xs text-slate-400">First report</span>;
+  if (!hasValue(latest) || !hasValue(previous)) return <span className="text-xs text-ink-3">First report</span>;
   const delta = latest - previous;
   const Icon = delta > 0 ? ArrowUpRight : delta < 0 ? ArrowDownRight : Minus;
-  const tone = delta > 0 ? 'text-emerald-700' : delta < 0 ? 'text-rose-700' : 'text-slate-500';
+  const tone = delta > 0 ? 'text-ok' : delta < 0 ? 'text-bad' : 'text-ink-3';
   return (
-    <span className={`inline-flex items-center gap-1 text-xs font-semibold ${tone}`}>
+    <span className={`inline-flex items-center gap-1 text-xs font-medium ${tone}`}>
       <Icon className="h-3.5 w-3.5" /> {delta > 0 ? '+' : ''}{delta} vs previous
     </span>
   );
@@ -176,116 +185,109 @@ export default function Reports() {
     navigate('/readiness');
   };
 
-  if (loading) {
-    return (
-      <div className="flex min-h-[50vh] items-center justify-center gap-3 text-sm text-slate-500">
-        <LoaderCircle className="h-5 w-5 animate-spin text-tealish-600" /> Loading reports...
-      </div>
-    );
-  }
+  if (loading) return <LoadingBlock label="Loading reports…" className="min-h-[50vh]" />;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <section>
-        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-tealish-600">Progress</p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">Reports</h1>
-        <p className="mt-2 text-slate-500">How your Standard interview evaluations have changed over time.</p>
-      </section>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <PageHeader
+        kicker="Progress"
+        title="Reports"
+        description="How your Standard interview evaluations have changed over time."
+      />
 
       {error ? (
-        <div role="alert" className="flex items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
-          <AlertCircle className="h-5 w-5 shrink-0" />
-          <p>{error}</p>
-        </div>
+        <Notice tone="bad">{error}</Notice>
       ) : reports.length === 0 ? (
-        <section className="card px-6 py-12 text-center">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-navy-50 text-navy-700">
-            <FileText className="h-6 w-6" />
-          </div>
-          <h2 className="mt-4 text-lg font-bold text-slate-900">No reports yet</h2>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
+        <Panel>
+          <EmptyState
+            icon={FileText}
+            title="No reports yet"
+            action={<button onClick={startNewInterview} className="primary-btn">Start Interview <ArrowRight className="h-4 w-4" /></button>}
+          >
             Complete a Standard interview to receive your first evaluation report.
-          </p>
-          <button onClick={startNewInterview} className="primary-btn mt-5">Start Interview <ArrowRight className="h-4 w-4" /></button>
-        </section>
+          </EmptyState>
+        </Panel>
       ) : (
         <>
-          <section className="grid gap-6 lg:grid-cols-[1fr_340px]">
-            <article className="card p-6">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">Overall Score Trend</h2>
-                  <p className="mt-1 text-xs text-slate-500">{trendPoints.length} evaluated interviews</p>
-                </div>
+          <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <Panel i={1} as="article" className="p-6 sm:p-7">
+              <div className="flex items-start justify-between gap-4">
+                <SectionTitle title="Overall Score Trend" description={`${trendPoints.length} evaluated interviews`} />
                 <div className="text-right">
-                  <p className="text-2xl font-bold text-slate-900">{hasValue(latest) ? latest : '—'}<span className="text-sm font-medium text-slate-400"> latest</span></p>
-                  <Change latest={latest} previous={previous} />
+                  <p className="num font-serif text-4xl leading-none text-ink">
+                    {hasValue(latest) ? <CountUp value={latest} /> : '—'}
+                  </p>
+                  <p className="mt-1.5 text-xs text-ink-3">latest</p>
                 </div>
               </div>
-              <div className="mt-4">
-                {trendPoints.length ? <ScoreTrendChart points={trendPoints} /> : <p className="text-sm text-slate-500">No scored reports yet.</p>}
+              <div className="mt-1 flex justify-end"><Change latest={latest} previous={previous} /></div>
+              <div className="mt-3">
+                {trendPoints.length ? <ScoreTrendChart points={trendPoints} /> : <p className="text-sm text-ink-3">No scored reports yet.</p>}
               </div>
-            </article>
-            <article className="card p-6">
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-tealish-600" />
-                <h2 className="text-lg font-bold text-slate-900">Average Breakdown</h2>
-              </div>
-              <p className="mt-1 text-xs text-slate-500">Across all saved reports</p>
+            </Panel>
+            <Panel i={2} as="article" className="p-6">
+              <SectionTitle title="Average Breakdown" description="Across all saved reports" />
               <div className="mt-6 space-y-5">
-                {componentAverages.map((item) => <ProgressBar key={item.label} {...item} />)}
+                {componentAverages.map((item, index) => <ProgressBar key={item.label} {...item} i={index} />)}
               </div>
-            </article>
+            </Panel>
           </section>
 
-          <section className="grid gap-6 lg:grid-cols-2">
-            {[['Recurring Strengths', strengths], ['Recurring Areas to Improve', improvements]].map(([title, items]) => (
-              <article key={title} className="card p-6">
-                <h2 className="text-lg font-bold text-slate-900">{title}</h2>
+          <section className="grid gap-5 lg:grid-cols-2">
+            {[['Recurring Strengths', strengths, 'ok'], ['Recurring Areas to Improve', improvements, 'warn']].map(([title, items, tone], index) => (
+              <Panel key={title} i={index + 3} as="article" className="p-6">
+                <SectionTitle title={title} />
                 {items.length ? (
-                  <ul className="mt-4 space-y-2">
-                    {items.map((item) => <li key={item} className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">{item}</li>)}
+                  <ul className="mt-3 divide-y divide-line">
+                    {items.map((item) => (
+                      <li key={item} className="flex items-center gap-3 py-2.5 text-sm text-ink-2">
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone === 'ok' ? 'bg-ok' : 'bg-warn'}`} />
+                        {item}
+                      </li>
+                    ))}
                   </ul>
                 ) : (
-                  <p className="mt-4 text-sm text-slate-500">Not enough data yet.</p>
+                  <p className="mt-4 text-sm text-ink-3">Not enough data yet.</p>
                 )}
-              </article>
+              </Panel>
             ))}
           </section>
 
-          <section className="card overflow-hidden">
-            <div className="border-b border-slate-100 px-6 py-5">
-              <h2 className="text-lg font-bold text-slate-900">All Reports</h2>
+          <Panel i={5} className="overflow-hidden">
+            <div className="border-b border-line px-6 py-5">
+              <SectionTitle title="All Reports" />
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[860px] text-left">
-                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="px-6 py-3 font-semibold">Role</th>
-                    <th className="px-6 py-3 font-semibold">Date</th>
-                    <th className="px-6 py-3 font-semibold">Duration</th>
-                    <th className="px-6 py-3 font-semibold">Overall</th>
-                    {COMPONENTS.map(({ key, label }) => <th key={key} className="px-4 py-3 font-semibold">{label}</th>)}
-                    <th className="px-6 py-3 font-semibold"><span className="sr-only">Open</span></th>
+              <table className="w-full min-w-[820px] text-left">
+                <thead className="text-xs text-ink-3">
+                  <tr className="border-b border-line">
+                    <th className="px-6 py-3 font-medium">Role</th>
+                    <th className="px-4 py-3 font-medium">Date</th>
+                    <th className="px-4 py-3 font-medium">Duration</th>
+                    <th className="px-4 py-3 font-medium">Overall</th>
+                    {COMPONENTS.map(({ key, label, short }) => (
+                      <th key={key} className="px-3 py-3 font-medium"><abbr title={label} className="no-underline">{short}</abbr></th>
+                    ))}
+                    <th className="px-6 py-3 font-medium"><span className="sr-only">Open</span></th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line">
                   {reports.map((report) => (
-                    <tr key={report.interview_id} className="hover:bg-slate-50/70">
-                      <td className="px-6 py-4 text-sm font-semibold text-slate-900">{report.role_title}</td>
-                      <td className="px-6 py-4 text-sm text-slate-500">{formatDate(report.evaluated_at || report.created_at)}</td>
-                      <td className="px-6 py-4 text-sm text-slate-500">{formatDuration(report.duration_seconds)}</td>
-                      <td className="px-6 py-4 text-sm font-semibold text-navy-800">{hasValue(report.overall_score) ? `${report.overall_score}%` : '—'}</td>
+                    <tr key={report.interview_id} className="group transition hover:bg-paper">
+                      <td className="px-6 py-3.5 text-sm font-medium text-ink">{report.role_title}</td>
+                      <td className="px-4 py-3.5 text-[13px] text-ink-2">{formatDate(report.evaluated_at || report.created_at)}</td>
+                      <td className="num px-4 py-3.5 font-mono text-[13px] text-ink-2">{formatDuration(report.duration_seconds)}</td>
+                      <td className="num px-4 py-3.5 font-mono text-sm text-ink">{hasValue(report.overall_score) ? `${report.overall_score}%` : '—'}</td>
                       {COMPONENTS.map(({ key }) => (
-                        <td key={key} className="px-4 py-4 text-sm text-slate-600">{hasValue(report[key]) ? `${report[key]}%` : '—'}</td>
+                        <td key={key} className="num px-3 py-3.5 font-mono text-[13px] text-ink-3">{hasValue(report[key]) ? report[key] : '—'}</td>
                       ))}
-                      <td className="px-6 py-4 text-right">
+                      <td className="px-6 py-3.5 text-right">
                         <Link
                           to={`/report?id=${encodeURIComponent(report.interview_id)}`}
                           aria-label={`Open report for ${report.role_title}`}
-                          className="text-sm font-semibold text-navy-700 hover:text-navy-900"
+                          className="inline-flex items-center gap-1 text-[13px] text-ink-2 transition hover:text-ink"
                         >
-                          Open
+                          Open <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
                         </Link>
                       </td>
                     </tr>
@@ -293,7 +295,7 @@ export default function Reports() {
                 </tbody>
               </table>
             </div>
-          </section>
+          </Panel>
         </>
       )}
     </div>

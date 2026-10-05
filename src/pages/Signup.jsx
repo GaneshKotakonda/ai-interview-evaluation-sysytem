@@ -1,7 +1,10 @@
 import { useState } from 'react';
-import { Eye, EyeOff, LoaderCircle, Mic } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import AuthShell from '../components/AuthShell';
+import PasswordInput from '../components/PasswordInput';
+import { Notice, Spinner } from '../components/ui';
 
 // -------------------------------------------------------------
 // Account creation with client-side validation before calling Firebase.
@@ -18,11 +21,14 @@ function friendlyFirebaseError(error) {
   return 'Unable to create your account right now. Please try again.';
 }
 
+function FieldError({ children }) {
+  return children ? <p className="fade-in mt-1.5 text-xs text-bad">{children}</p> : null;
+}
+
 export default function Signup() {
   const { user, signup } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({ fullName: '', email: '', password: '', confirmPassword: '' });
-  const [showPassword, setShowPassword] = useState(false);
   const [errors, setErrors] = useState({});
   const [firebaseError, setFirebaseError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -63,58 +69,39 @@ export default function Signup() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 px-5 py-10 sm:px-8">
-      <div className="mx-auto w-full max-w-lg">
-        <div className="mb-7 flex items-center justify-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-navy-900 text-white"><Mic className="h-5 w-5" /></div>
+    <AuthShell
+      title="Create your account"
+      description="Set up a profile and run your first practice interview in a few minutes."
+      footer={<>Already have an account? <Link to="/login" className="link">Sign in</Link></>}
+    >
+      {firebaseError && <Notice tone="bad" className="mb-5">{firebaseError}</Notice>}
+      <form className="space-y-4" onSubmit={handleSubmit} noValidate>
+        <div>
+          <label htmlFor="fullName" className="field-label">Full Name</label>
+          <input id="fullName" className="input-field" value={form.fullName} onChange={(e) => updateField('fullName', e.target.value)} placeholder="Your full name" autoComplete="name" />
+          <FieldError>{errors.fullName}</FieldError>
+        </div>
+        <div>
+          <label htmlFor="email" className="field-label">Email</label>
+          <input id="email" type="email" className="input-field" value={form.email} onChange={(e) => updateField('email', e.target.value)} placeholder="you@example.com" autoComplete="email" />
+          <FieldError>{errors.email}</FieldError>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <p className="font-bold text-navy-900">AI Interview Evaluation System</p>
-            <p className="text-sm text-slate-500">Candidate Registration</p>
+            <label htmlFor="password" className="field-label">Password</label>
+            <PasswordInput id="password" value={form.password} onChange={(e) => updateField('password', e.target.value)} placeholder="6+ characters" autoComplete="new-password" />
+            <FieldError>{errors.password}</FieldError>
+          </div>
+          <div>
+            <label htmlFor="confirmPassword" className="field-label">Confirm Password</label>
+            <input id="confirmPassword" type="password" className="input-field" value={form.confirmPassword} onChange={(e) => updateField('confirmPassword', e.target.value)} placeholder="Repeat it" autoComplete="new-password" />
+            <FieldError>{errors.confirmPassword}</FieldError>
           </div>
         </div>
-
-        <div className="card p-6 sm:p-8">
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">Create your account</h1>
-          <p className="mt-2 text-sm text-slate-500">Set up your profile and begin your mock interview practice.</p>
-
-          {firebaseError && <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{firebaseError}</div>}
-
-          <form className="mt-6 space-y-4" onSubmit={handleSubmit} noValidate>
-            <div>
-              <label htmlFor="fullName" className="mb-2 block text-sm font-medium text-slate-700">Full Name</label>
-              <input id="fullName" className="input-field" value={form.fullName} onChange={(e) => updateField('fullName', e.target.value)} placeholder="Your full name" autoComplete="name" />
-              {errors.fullName && <p className="mt-1.5 text-xs text-rose-600">{errors.fullName}</p>}
-            </div>
-            <div>
-              <label htmlFor="email" className="mb-2 block text-sm font-medium text-slate-700">Email</label>
-              <input id="email" type="email" className="input-field" value={form.email} onChange={(e) => updateField('email', e.target.value)} placeholder="you@example.com" autoComplete="email" />
-              {errors.email && <p className="mt-1.5 text-xs text-rose-600">{errors.email}</p>}
-            </div>
-            <div>
-              <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-700">Password</label>
-              <div className="relative">
-                <input id="password" type={showPassword ? 'text' : 'password'} className="input-field pr-11" value={form.password} onChange={(e) => updateField('password', e.target.value)} placeholder="Minimum 6 characters" autoComplete="new-password" />
-                <button type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword((value) => !value)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700">
-                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
-                </button>
-              </div>
-              {errors.password && <p className="mt-1.5 text-xs text-rose-600">{errors.password}</p>}
-            </div>
-            <div>
-              <label htmlFor="confirmPassword" className="mb-2 block text-sm font-medium text-slate-700">Confirm Password</label>
-              <input id="confirmPassword" type="password" className="input-field" value={form.confirmPassword} onChange={(e) => updateField('confirmPassword', e.target.value)} placeholder="Re-enter your password" autoComplete="new-password" />
-              {errors.confirmPassword && <p className="mt-1.5 text-xs text-rose-600">{errors.confirmPassword}</p>}
-            </div>
-
-            <button className="primary-btn mt-2 w-full" disabled={submitting}>
-              {submitting && <LoaderCircle className="h-4 w-4 animate-spin" />}
-              {submitting ? 'Creating Account...' : 'Create Account'}
-            </button>
-          </form>
-
-          <p className="mt-6 text-center text-sm text-slate-500">Already have an account? <Link to="/login" className="font-semibold text-navy-700 hover:text-navy-900">Sign in</Link></p>
-        </div>
-      </div>
-    </div>
+        <button className="primary-btn mt-2 w-full !py-3" disabled={submitting}>
+          {submitting ? <><Spinner /> Creating Account…</> : <>Create Account <ArrowRight className="h-4 w-4" /></>}
+        </button>
+      </form>
+    </AuthShell>
   );
 }

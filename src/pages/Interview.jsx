@@ -3,16 +3,15 @@ import {
   ArrowRight,
   Camera,
   Check,
-  CircleDot,
-  Loader2,
-  Mic,
+  Clock3,
   Square,
   Video,
-  Wifi,
-  Sparkles,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BehaviorMonitor from '../components/BehaviorMonitor';
+import {
+  Badge, FlowSteps, Notice, Panel, SectionTitle, Skeleton, Spinner,
+} from '../components/ui';
 import { api } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
@@ -405,188 +404,187 @@ export default function Interview() {
   // -------------------------------------------------------------
   if (loadingQuestions) {
     return (
-      <div className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center text-center">
-        <Loader2 className="h-12 w-12 animate-spin text-tealish-600" />
-        <h2 className="mt-6 text-2xl font-bold text-slate-900">Preparing Your AI Interview</h2>
-        <p className="mt-2 text-slate-500">
-          Google Gemini is analyzing the {targetRole} job requirements and preparing your first adaptive question...
-        </p>
+      <div className="mx-auto max-w-3xl space-y-8">
+        <FlowSteps current={1} />
+        <Panel className="p-8 sm:p-10">
+          <div className="flex items-center gap-2 text-[13px] text-ink-3">
+            <Spinner /> Preparing your interview
+          </div>
+          <h2 className="mt-4 font-serif text-3xl leading-tight text-ink">Writing your first question for {targetRole}…</h2>
+          <p className="mt-3 text-sm leading-relaxed text-ink-2">
+            Gemini is reading the role requirements. The first question starts at medium difficulty and later questions adapt to your answers.
+          </p>
+          <div className="mt-8 space-y-3">
+            <Skeleton className="h-5 w-11/12" />
+            <Skeleton className="h-5 w-8/12" />
+          </div>
+        </Panel>
       </div>
     );
   }
 
   if (!currentQuestion) {
-    return <section className="card mx-auto max-w-xl p-6">
-      <p role="alert" className="text-slate-700">{flowError}</p>
-      <button className="primary-btn mt-4" onClick={() => setStartAttempt((value) => value + 1)}>Retry Start</button>
-    </section>;
+    return (
+      <Panel className="mx-auto max-w-xl p-6">
+        <p role="alert" className="text-sm text-ink-2">{flowError}</p>
+        <button className="primary-btn mt-4" onClick={() => setStartAttempt((value) => value + 1)}>Retry Start</button>
+      </Panel>
+    );
   }
 
   // -------------------------------------------------------------
   // BLOCK 10: Render Main Interview Interface
   // -------------------------------------------------------------
+  const phaseMessage = phase === 'recording' ? 'Finishing your recording…'
+    : phase === 'submitting' ? 'Analyzing your response…'
+    : phase === 'advancing' ? 'Preparing the next question…' : '';
+  const liveStatus = [
+    { label: 'Camera', value: cameraReady ? 'Active' : 'Unavailable', ok: cameraReady },
+    { label: 'Microphone', value: microphoneReady ? 'Active' : 'Unavailable', ok: microphoneReady },
+    { label: 'Eye Tracking', value: cameraReady ? 'Tracking' : 'Waiting', ok: cameraReady },
+    { label: 'Network', value: networkReady ? 'Online' : 'Offline', ok: networkReady },
+  ];
+
   return (
-    <div className="mx-auto max-w-[1500px]">
-      {/* Top Banner & Progress Bar */}
-      <section className="card mb-6 p-5 sm:p-6">
-        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mx-auto max-w-7xl space-y-6">
+      {/* Header: role, question counter, timer and segmented progress */}
+      <header className="reveal space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-tealish-600">
-                AI Interview · {targetRole}
-              </p>
-              {targetJd && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">
-                  <Sparkles className="h-3 w-3" /> Tailored to Job Description
-                </span>
-              )}
+            <div className="flex flex-wrap items-center gap-2 text-[13px] text-ink-3">
+              <span>{targetRole}</span>
+              {targetJd && <Badge tone="ink">Tailored to JD</Badge>}
             </div>
-            <h1 className="mt-1 text-2xl font-bold text-slate-900">
+            <h1 className="mt-1 font-serif text-[2.4rem] leading-none text-ink">
               Question {currentTurn} of {maxTurns}
             </h1>
           </div>
-          <div className="flex items-center gap-3 rounded-xl bg-navy-50 px-4 py-3 text-navy-900">
-            <CircleDot className="h-4 w-4" />
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">Interview Timer</p>
-              <p className="font-mono text-lg font-bold">{formatTime(secondsLeft)}</p>
-            </div>
+          <div className="flex items-center gap-2 self-start rounded-full border border-line bg-surface px-3.5 py-1.5 sm:self-auto">
+            <Clock3 className="h-3.5 w-3.5 text-ink-3" />
+            <span className="sr-only">Interview Timer</span>
+            <span className="num font-mono text-sm text-ink">{formatTime(secondsLeft)}</span>
           </div>
         </div>
-        <div role="progressbar" aria-label="Interview progress" aria-valuemin={0} aria-valuemax={maxTurns} aria-valuenow={currentTurn} className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100">
-          <div
-            className="h-full rounded-full bg-tealish-500 transition-all duration-300"
-            style={{ width: `${progress}%` }}
-          />
+        <div
+          role="progressbar"
+          aria-label="Interview progress"
+          aria-valuemin={0}
+          aria-valuemax={maxTurns}
+          aria-valuenow={currentTurn}
+          className="flex gap-1.5"
+        >
+          {Array.from({ length: maxTurns }, (_, index) => {
+            const turn = index + 1;
+            const state = turn < currentTurn || (turn === currentTurn && currentResponse.completed) ? 'done'
+              : turn === currentTurn ? 'active' : 'todo';
+            return (
+              <span key={turn} className="relative h-1 flex-1 overflow-hidden rounded-full bg-line">
+                {state !== 'todo' && (
+                  <span className={`grow-x absolute inset-0 rounded-full ${state === 'done' ? 'bg-ink' : 'bg-ink/35'}`} />
+                )}
+              </span>
+            );
+          })}
         </div>
+      </header>
 
-      </section>
-
-      <div className="grid gap-6 xl:grid-cols-[1fr_340px]">
-        {/* Left Column: Question, Video Recorder & Transcript */}
-        <section className="space-y-6">
-          <article className="card p-5 sm:p-6">
-            <div className="flex items-start gap-4">
-              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-navy-50 text-sm font-bold text-navy-800">
-                {currentTurn}
-              </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Current Question</p>
-                <div className="mt-2 flex gap-2 text-xs font-semibold">
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">{currentQuestion.difficulty?.replace(/^./, (c) => c.toUpperCase())}</span>
-                  {currentQuestion.is_follow_up && <span className="rounded-full bg-teal-50 px-3 py-1 text-teal-700">AI Follow-up</span>}
-                </div>
-                <h2 className="mt-2 text-xl font-bold leading-8 text-slate-900 sm:text-2xl">
-                  {currentQuestionText}
-                </h2>
-              </div>
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        {/* Question and answer */}
+        <section className="space-y-5">
+          <Panel i={1} as="article" key={`question-${currentTurn}`} className="p-6 sm:p-8">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="num font-mono text-ink-3">Q{currentTurn}</span>
+              <span className="text-ink-4">·</span>
+              <Badge>{currentQuestion.difficulty?.replace(/^./, (c) => c.toUpperCase())}</Badge>
+              {currentQuestion.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
+              {currentQuestion.topic && <span className="text-ink-3">{currentQuestion.topic}</span>}
             </div>
+            <h2 className="mt-4 font-serif text-[1.75rem] leading-snug text-ink sm:text-[2rem]">
+              {currentQuestionText}
+            </h2>
+          </Panel>
 
-            {/* Video Preview Box */}
-            <div className="relative mt-6 aspect-video overflow-hidden rounded-2xl bg-slate-950">
-              <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-              {!cameraReady && (
-                <div className="absolute inset-0 grid place-items-center text-center text-slate-300">
-                  <div>
-                    <Camera className="mx-auto h-8 w-8" />
-                    <p className="mt-3 text-sm">Camera preview unavailable</p>
-                  </div>
-                </div>
-              )}
-              <div className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-slate-950/70 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur">
-                <span className={`h-2.5 w-2.5 rounded-full bg-rose-500 ${recording ? 'animate-pulse' : ''}`} />
-                {recording ? 'Recording Answer...' : 'Camera Active'}
-              </div>
-              <div className="absolute bottom-4 right-4 rounded-lg bg-slate-950/70 px-3 py-1.5 font-mono text-xs text-white backdrop-blur">
-                {formatTime(secondsLeft)}
-              </div>
-            </div>
-
-            {mediaError && (
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                {mediaError}
-              </div>
-            )}
-
-            {/* Answer Recording Buttons */}
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              {!recording ? (
-                <button
-                  onClick={startRecording}
-                  disabled={!cameraReady || !microphoneReady || answerLocked}
-                  className="primary-btn"
-                >
-                  <Video className="h-4 w-4" /> Start Answer Recording
-                </button>
-              ) : (
-                <button
-                  onClick={stopRecording}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-rose-700"
-                >
-                  <Square className="h-4 w-4 fill-current" /> Stop Answer
-                </button>
-              )}
-              {recording && (
-                <span className="inline-flex items-center gap-2 text-sm font-semibold text-rose-600">
-                  <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-500" />
-                  Recording Video & Audio...
-                </span>
-              )}
-              {recordingSaved && !recording && (
-                <span className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-700">
-                  <Check className="h-4 w-4" />
-                  Answer Video Recorded & Ready
-                </span>
-              )}
-            </div>
-
-            {/* Temporary Playback Preview */}
-            {playbackUrl && (
-              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Recorded Answer Preview</p>
-                <video controls src={playbackUrl} className="max-h-52 w-full rounded-lg bg-black" />
-              </div>
-            )}
-          </article>
-
-          {/* Transcript / Text Answer Box */}
-          <article className="card p-5 sm:p-6">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="font-bold text-slate-900">Transcript / Answer Response</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Type or review your response. Your answer will be evaluated against ideal rubric points via RAG.
-                </p>
-              </div>
-              <span className="text-xs font-medium text-slate-400">{currentResponse.answer.length} chars</span>
-            </div>
+          <Panel i={2} as="article" className="p-6 sm:p-7">
+            <SectionTitle
+              title="Your answer"
+              description="Type or review your response. It is scored against the question's private rubric."
+              action={<span className="num font-mono text-xs text-ink-4">{currentResponse.answer.length} chars</span>}
+            />
             <textarea
               aria-label="Your answer"
               disabled={answerLocked}
-              rows="6"
+              rows="9"
               value={currentResponse.answer}
               onChange={(e) => updateAnswer(e.target.value)}
-              className="input-field mt-5 resize-y leading-6"
-              placeholder="Explain your approach, technical concepts, architecture, and relevant trade-offs here..."
+              className="input-field mt-5 resize-y !text-[15px] leading-relaxed"
+              placeholder="Explain your approach, the concepts involved and the trade-offs you would weigh…"
             />
-            {flowError && <p role="alert" className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">{flowError}</p>}
-            {currentResponse.completed && <p className="mt-3 text-sm text-slate-500">Answer submitted. This response is now read-only.</p>}
-            <div className="mt-5 flex items-center justify-between gap-3">
-              <p role="status" className="text-sm text-slate-600">
-                {phase === 'recording' ? 'Finishing your recording…' : phase === 'submitting' ? 'Analyzing your response…' : phase === 'advancing' ? 'Preparing the next question…' : ''}
+            {flowError && <Notice tone="warn" role="alert" className="mt-4">{flowError}</Notice>}
+            {currentResponse.completed && <p className="mt-3 text-[13px] text-ink-3">Answer submitted. This response is now read-only.</p>}
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+              <p role="status" className="flex items-center gap-2 text-[13px] text-ink-2">
+                {phaseMessage && <Spinner className="h-3.5 w-3.5" />}
+                {phaseMessage}
               </p>
               <button onClick={goNext} disabled={busy || (!currentResponse.completed && !currentResponse.answer.trim())} className="primary-btn">
-                {busy ? <><Loader2 className="h-4 w-4 animate-spin" /> Please wait</>
+                {busy ? <><Spinner /> Please wait</>
                   : phase === 'advance-error' ? 'Retry Next Question'
                   : phase === 'submit-error' ? 'Retry Submission'
                   : <>Submit Answer <ArrowRight className="h-4 w-4" /></>}
               </button>
             </div>
-          </article>
+          </Panel>
         </section>
 
-        {/* Right Aside: Computer Vision Behavior Monitor & Live Status */}
-        <aside className="space-y-5">
+        {/* Camera, recording, engagement and status */}
+        <aside className="space-y-5 xl:sticky xl:top-24 xl:self-start">
+          <Panel i={3} className="overflow-hidden">
+            <div className="relative aspect-video bg-ink">
+              <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+              {!cameraReady && (
+                <div className="absolute inset-0 grid place-items-center text-center text-paper/60">
+                  <div>
+                    <Camera className="mx-auto h-6 w-6" strokeWidth={1.5} />
+                    <p className="mt-2 text-[13px]">Camera preview unavailable</p>
+                  </div>
+                </div>
+              )}
+              <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-ink/60 px-2.5 py-1 text-[11px] font-medium text-paper backdrop-blur">
+                <span className={`h-2 w-2 rounded-full ${recording ? 'pulse-dot bg-[#e0796d]' : 'bg-paper/60'}`} />
+                {recording ? 'Recording' : 'Camera on'}
+              </div>
+            </div>
+            <div className="space-y-3 p-4">
+              {!recording ? (
+                <button
+                  onClick={startRecording}
+                  disabled={!cameraReady || !microphoneReady || answerLocked}
+                  className="secondary-btn w-full"
+                >
+                  <Video className="h-4 w-4" /> Start Answer Recording
+                </button>
+              ) : (
+                <button onClick={stopRecording} className="danger-btn w-full">
+                  <Square className="h-3.5 w-3.5 fill-current" /> Stop Answer
+                </button>
+              )}
+              {recording && (
+                <p className="flex items-center gap-2 text-xs text-bad">
+                  <span className="pulse-dot h-2 w-2 rounded-full bg-bad" /> Recording video and audio…
+                </p>
+              )}
+              {recordingSaved && !recording && (
+                <p className="fade-in flex items-center gap-2 text-xs text-ok">
+                  <Check className="h-3.5 w-3.5" /> Answer video recorded and ready
+                </p>
+              )}
+              {playbackUrl && (
+                <video controls src={playbackUrl} className="fade-in max-h-44 w-full rounded-control bg-ink" />
+              )}
+              {mediaError && <Notice tone="warn">{mediaError}</Notice>}
+            </div>
+          </Panel>
+
           <BehaviorMonitor
             videoRef={videoRef}
             active={cameraReady}
@@ -594,43 +592,24 @@ export default function Interview() {
               visionMetricsRef.current = nextMetrics;
             }}
           />
-          <div className="card p-5 xl:sticky xl:top-28">
-            <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700">Live Status</h2>
-            <div className="mt-5 space-y-3">
-              {[
-                { icon: Camera, label: 'Camera', value: cameraReady ? 'Active' : 'Unavailable', ok: cameraReady },
-                { icon: Mic, label: 'Microphone', value: microphoneReady ? 'Active' : 'Unavailable', ok: microphoneReady },
-                { icon: CircleDot, label: 'Eye Tracking', value: cameraReady ? 'Tracking Active' : 'Waiting', ok: cameraReady },
-                { icon: Wifi, label: 'Network', value: networkReady ? 'Online' : 'Offline', ok: networkReady },
-              ].map(({ icon: Icon, label, value, ok }) => (
-                <div key={label} className="flex items-center gap-3 rounded-xl border border-slate-200 p-3">
-                  <div className="rounded-lg bg-slate-50 p-2 text-slate-600">
-                    <Icon className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-slate-800">{label}</p>
-                    <p className={`text-xs ${ok ? 'text-emerald-600' : 'text-amber-600'}`}>{value}</p>
-                  </div>
-                  <span className={`h-2.5 w-2.5 rounded-full ${ok ? 'bg-emerald-500' : 'bg-amber-400'}`} />
-                </div>
-              ))}
-            </div>
 
-            <div className="mt-6 rounded-xl bg-slate-50 p-4">
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>Completed</span>
-                <span>
-                  {answeredCount}/{totalQuestions}
-                </span>
-              </div>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full rounded-full bg-navy-700 transition-all duration-300"
-                  style={{ width: `${(answeredCount / totalQuestions) * 100}%` }}
-                />
-              </div>
+          <Panel i={5} className="p-5">
+            <div className="flex items-baseline justify-between">
+              <h2 className="text-[15px] font-semibold text-ink">Live status</h2>
+              <span className="num font-mono text-xs text-ink-3">{answeredCount}/{totalQuestions} answered</span>
             </div>
-          </div>
+            <ul className="mt-3 divide-y divide-line">
+              {liveStatus.map(({ label, value, ok }) => (
+                <li key={label} className="flex items-center justify-between py-2.5 text-[13px]">
+                  <span className="text-ink-2">{label}</span>
+                  <span className={`flex items-center gap-2 ${ok ? 'text-ink' : 'text-warn'}`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-ok' : 'bg-warn'}`} />
+                    {value}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
         </aside>
       </div>
     </div>

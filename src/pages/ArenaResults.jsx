@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Trophy } from 'lucide-react';
+import { ArrowRight, Trophy } from 'lucide-react';
+import {
+  CountUp, EmptyState, Notice, PageHeader, Panel, ScoreBar, SectionTitle, Spinner, Stat, StatRow,
+} from '../components/ui';
 import { api } from '../services/api';
 import { STORAGE_KEYS } from '../utils/interviewJourney';
 
@@ -30,52 +33,105 @@ export default function ArenaResults() {
     return () => { active = false; };
   }, [interviewId, attempt]);
 
-  if (!interviewId) return <section className="card mx-auto max-w-xl p-8">
-    <h1 className="text-2xl font-bold">Arena Results</h1><p className="my-4">No Arena session is selected.</p><Link to="/arena" className="primary-btn">Choose Practice Area</Link>
-  </section>;
-  if (!results) return <section className="card mx-auto max-w-xl p-8">
-    <h1 className="text-2xl font-bold">Arena Results</h1>
-    {error ? <><p role="alert" className="my-4">{error}</p><button className="primary-btn" onClick={() => setAttempt((n) => n + 1)}>Retry Results</button></> : <p role="status" className="mt-4">Loading your saved results…</p>}
-  </section>;
+  if (!interviewId) return (
+    <Panel className="mx-auto max-w-xl">
+      <EmptyState icon={Trophy} title="Arena Results" headingLevel="h1" action={<Link to="/arena" className="primary-btn">Choose Practice Area</Link>}>
+        No Arena session is selected.
+      </EmptyState>
+    </Panel>
+  );
+  if (!results) return (
+    <Panel className="mx-auto max-w-xl p-8">
+      <h1 className="font-serif text-3xl text-ink">Arena Results</h1>
+      {error ? (
+        <>
+          <Notice tone="bad" className="my-4">{error}</Notice>
+          <button className="primary-btn" onClick={() => setAttempt((n) => n + 1)}>Retry Results</button>
+        </>
+      ) : (
+        <p role="status" className="mt-4 flex items-center gap-2 text-sm text-ink-2"><Spinner /> Loading your saved results…</p>
+      )}
+    </Panel>
+  );
 
   // The last turn of a full Arena session is the Boss Round.
   const bossTurn = results.max_turns || 6;
   const capitalize = (text) => (text ? text[0].toUpperCase() + text.slice(1) : '—');
 
-  return <div className="mx-auto max-w-5xl space-y-6">
-    <header className="rounded-2xl bg-navy-900 p-8 text-white">
-      <Trophy aria-hidden="true" className="h-8 w-8 text-teal-200" />
-      <h1 className="mt-4 text-3xl font-bold">Arena Complete</h1>
-      <p className="mt-2 text-slate-300">{results.role_title} · Your challenge results</p>
-    </header>
-    <section aria-label="Arena statistics" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {[
-        ['Total XP', results.total_xp], ['Best Streak', results.best_streak],
-        ['Average Answer Score', `${results.average_score} / 100`],
-        ['Highest Difficulty Reached', capitalize(results.highest_difficulty)],
-        ['Boss Round Score', results.boss_score == null ? 'Unavailable' : `${results.boss_score} / 100`],
-        ['Questions Completed', results.questions_completed],
-      ].map(([label, value]) => <div className="card p-5" key={label}><p className="text-sm text-slate-500">{label}</p><p className="mt-2 text-2xl font-bold text-navy-900">{value}</p></div>)}
-    </section>
-    <section className="grid gap-6 sm:grid-cols-2">
-      {[["Strongest Areas", results.strongest_areas], ["Areas to Practice", results.practice_areas]].map(([title, topics]) => <article key={title} className="card p-6">
-        <h2 className="text-lg font-bold">{title}</h2>
-        <p className="mt-2 text-xs text-slate-500">Based on your average evaluated score for each topic.</p>
-        {topics.length ? <ul className="mt-4 space-y-3">{topics.map((item) => <li key={item.topic} className="flex justify-between gap-3 text-sm"><span>{item.topic}</span><span>{item.score} / 100</span></li>)}</ul> : <p className="mt-4 text-sm text-slate-500">Not enough data yet.</p>}
-      </article>)}
-    </section>
-    <section className="card p-6">
-      <h2 className="text-lg font-bold">Challenge Feedback</h2>
-      <ol className="mt-4 space-y-4">{results.turns.map((turn) => <li key={turn.question_index} className="rounded-xl bg-slate-50 p-4">
-        <h3 className="font-semibold">{turn.question_index === bossTurn ? 'Boss Round' : `Level ${turn.question_index}`} · {turn.topic}</h3>
-        <p className="mt-2 text-sm leading-6 text-slate-600">{turn.feedback}</p>
-        {turn.evaluation_source === 'fallback' && <p className="mt-2 text-xs text-amber-700">Approximate evaluation — AI evaluator unavailable.</p>}
-      </li>)}</ol>
-    </section>
-    <nav aria-label="Arena result actions" className="flex flex-wrap gap-3">
-      <Link to="/arena" className="primary-btn">Play Again</Link>
-      <Link to="/readiness" className="secondary-btn">Try Standard Interview</Link>
-      <Link to="/dashboard" className="secondary-btn">Back to Dashboard</Link>
-    </nav>
-  </div>;
+  return (
+    <div className="mx-auto max-w-5xl space-y-6">
+      <PageHeader
+        kicker={results.role_title ? `${results.role_title} · Interview Arena` : 'Interview Arena'}
+        title="Arena Complete"
+        description="Your saved challenge results, level by level."
+      />
+
+      <Panel i={1} className="grid overflow-hidden md:grid-cols-[300px_minmax(0,1fr)]">
+        <div className="flex flex-col justify-between gap-8 bg-ink p-7 text-paper">
+          <Trophy aria-hidden="true" className="h-6 w-6 text-paper/60" />
+          <div>
+            <p className="num font-serif text-[5rem] leading-[0.85]"><CountUp value={results.total_xp} duration={1200} /></p>
+            <p className="mt-3 text-[13px] text-paper/60">Total XP</p>
+          </div>
+        </div>
+        {/* gap-px over a line-coloured background draws the hairlines */}
+        <div className="grid grid-cols-2 gap-px bg-line sm:grid-cols-3">
+          {[
+            ['Best Streak', results.best_streak],
+            ['Average Answer Score', `${results.average_score} / 100`],
+            ['Highest Difficulty', capitalize(results.highest_difficulty)],
+            ['Boss Round Score', results.boss_score == null ? 'Unavailable' : `${results.boss_score} / 100`],
+            ['Questions Completed', results.questions_completed],
+          ].map(([label, value]) => (
+            <div key={label} className="bg-surface"><Stat label={label} value={value} /></div>
+          ))}
+          <div className="bg-surface" aria-hidden="true" />
+        </div>
+      </Panel>
+
+      <section className="grid gap-5 sm:grid-cols-2">
+        {[['Strongest Areas', results.strongest_areas], ['Areas to Practice', results.practice_areas]].map(([title, topics], index) => (
+          <Panel key={title} i={index + 2} as="article" className="p-6">
+            <SectionTitle title={title} description="Average evaluated score for each topic." />
+            {topics.length ? (
+              <ul className="mt-4 divide-y divide-line">
+                {topics.map((item) => (
+                  <li key={item.topic} className="flex items-center justify-between gap-3 py-3 text-sm">
+                    <span className="text-ink">{item.topic}</span>
+                    <span className="flex items-center gap-3">
+                      <ScoreBar value={item.score} className="w-16" />
+                      <span className="num whitespace-nowrap text-right font-mono text-[13px] text-ink-2">{item.score} / 100</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="mt-4 text-sm text-ink-3">Not enough data yet.</p>}
+          </Panel>
+        ))}
+      </section>
+
+      <Panel i={4} className="p-6 sm:p-8">
+        <SectionTitle title="Challenge Feedback" />
+        <ol className="mt-5 divide-y divide-line">
+          {results.turns.map((turn, index) => (
+            <li key={turn.question_index} className="reveal grid gap-1 py-4 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-6" style={{ '--i': index + 5 }}>
+              <h3 className="text-sm font-medium text-ink">
+                {turn.question_index === bossTurn ? 'Boss Round' : `Level ${turn.question_index}`} · {turn.topic}
+              </h3>
+              <div>
+                <p className="text-sm leading-relaxed text-ink-2">{turn.feedback}</p>
+                {turn.evaluation_source === 'fallback' && <p className="mt-1.5 text-xs text-warn">Approximate evaluation — AI evaluator unavailable.</p>}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </Panel>
+
+      <nav aria-label="Arena result actions" className="reveal flex flex-wrap gap-2" style={{ '--i': 6 }}>
+        <Link to="/arena" className="primary-btn">Play Again <ArrowRight aria-hidden="true" className="h-4 w-4" /></Link>
+        <Link to="/readiness" className="secondary-btn">Try Standard Interview</Link>
+        <Link to="/dashboard" className="ghost-btn">Back to Dashboard</Link>
+      </nav>
+    </div>
+  );
 }

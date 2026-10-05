@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { Eye, ScanFace, Users, Activity } from 'lucide-react';
 import { analyzeFaceResult, createVisionStats, getFaceLandmarker, metricsSnapshot } from '../services/visionAnalyzer';
 
 // -------------------------------------------------------------
@@ -11,14 +10,19 @@ import { analyzeFaceResult, createVisionStats, getFaceLandmarker, metricsSnapsho
 // browser from this component; only the aggregated percentages are used.
 const SAMPLE_INTERVAL_MS = 200;
 
-function Metric({ icon: Icon, label, value }) {
+// One live reading: label, value and (for percentages) a thin bar.
+function Metric({ label, value, percent }) {
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
-      <div className="rounded-lg bg-slate-50 p-2 text-slate-600"><Icon className="h-4 w-4" /></div>
-      <div className="min-w-0 flex-1">
-        <p className="text-xs text-slate-500">{label}</p>
-        <p className="text-sm font-semibold text-slate-800">{value}</p>
+    <div className="py-2.5">
+      <div className="flex items-baseline justify-between gap-3 text-[13px]">
+        <span className="text-ink-2">{label}</span>
+        <span className="num font-mono text-ink">{value}</span>
       </div>
+      {percent !== undefined && (
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-sunken">
+          <div className="h-full rounded-full bg-ink transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
+        </div>
+      )}
     </div>
   );
 }
@@ -112,30 +116,27 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
   }, [active, videoRef]);
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-tealish-600" />
-          <div>
-            <p className="text-sm font-semibold text-slate-800">Camera Engagement</p>
-            <p className="text-xs text-slate-500">{status}</p>
-          </div>
+    <section className="card reveal p-5" style={{ '--i': 4 }}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[15px] font-semibold text-ink">Camera Engagement</h2>
+          <p className="mt-0.5 text-xs text-ink-3">{status}</p>
         </div>
-        <span className={`h-2.5 w-2.5 rounded-full ${status === 'Live analysis active' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
+        <span className={`mt-1.5 h-2 w-2 rounded-full ${status === 'Live analysis active' ? 'bg-ok' : 'bg-warn'}`} />
       </div>
 
       {metrics && (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <Metric icon={ScanFace} label="Face presence" value={`${metrics.facePresence}%`} />
-          <Metric icon={Eye} label="Approximate screen gaze" value={`${metrics.eyeContact}%`} />
-          <Metric icon={Activity} label="Head alignment" value={`${metrics.cameraFacing}%`} />
-          <Metric icon={Users} label="Faces now" value={metrics.faceCount > 0 ? metrics.faceCount : 'None'} />
+        <div className="fade-in mt-2 divide-y divide-line">
+          <Metric label="Face presence" value={`${metrics.facePresence}%`} percent={metrics.facePresence} />
+          <Metric label="Approximate screen gaze" value={`${metrics.eyeContact}%`} percent={metrics.eyeContact} />
+          <Metric label="Head alignment" value={`${metrics.cameraFacing}%`} percent={metrics.cameraFacing} />
+          <Metric label="Faces now" value={metrics.faceCount > 0 ? metrics.faceCount : 'None'} />
         </div>
       )}
 
-      <p className="mt-3 text-[11px] leading-5 text-slate-400">
-        This module reports observable video signals such as face presence, gaze direction and head alignment. It does not infer personality, hiring suitability, or mental state.
+      <p className="mt-3 text-[11px] leading-relaxed text-ink-4">
+        Observable video signals only: face presence, gaze direction and head alignment. It does not infer personality, hiring suitability or mental state.
       </p>
-    </div>
+    </section>
   );
 }

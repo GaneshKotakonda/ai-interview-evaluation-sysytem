@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Gamepad2, Loader2 } from 'lucide-react';
+import { ArrowRight, Gamepad2, Lightbulb } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import {
+  CountUp, EmptyState, Notice, Panel, Spinner,
+} from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
 import { STORAGE_KEYS } from '../utils/interviewJourney';
@@ -147,61 +150,136 @@ export default function ArenaPlay() {
     setPhase('answering');
   }
 
-  if (!valid) return <section className="card mx-auto max-w-xl p-8">
-    <h1 className="text-2xl font-bold">Interview Arena</h1>
-    <p className="my-4 text-slate-600">Choose a practice area to start your challenge.</p>
-    <Link to="/arena" className="primary-btn">Choose Practice Area</Link>
-  </section>;
-  if (!question) return <section className="card mx-auto max-w-xl p-8">
-    <h1 className="text-2xl font-bold">Preparing Interview Arena</h1>
-    {phase === 'loading' ? <p role="status" className="mt-4 flex gap-2"><Loader2 className="h-5 w-5 animate-spin" />Preparing your first challenge…</p>
-      : <><p role="alert" className="my-4">{error}</p><button className="primary-btn" onClick={() => setAttempt((n) => n + 1)}>Retry Start</button></>}
-  </section>;
+  if (!valid) return (
+    <Panel className="mx-auto max-w-xl">
+      <EmptyState
+        icon={Gamepad2}
+        title="Interview Arena"
+        headingLevel="h1"
+        action={<Link to="/arena" className="primary-btn">Choose Practice Area</Link>}
+      >
+        Choose a practice area to start your challenge.
+      </EmptyState>
+    </Panel>
+  );
+  if (!question) return (
+    <Panel className="mx-auto max-w-xl p-8">
+      <h1 className="font-serif text-3xl text-ink">Preparing Interview Arena</h1>
+      {phase === 'loading' ? (
+        <p role="status" className="mt-4 flex items-center gap-2 text-sm text-ink-2"><Spinner />Preparing your first challenge…</p>
+      ) : (
+        <>
+          <p role="alert" className="my-4 text-sm text-ink-2">{error}</p>
+          <button className="primary-btn" onClick={() => setAttempt((n) => n + 1)}>Retry Start</button>
+        </>
+      )}
+    </Panel>
+  );
+
+  const boss = Boolean(question.boss_round);
+  const totalLevels = session.max_turns || 6;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
-      <header className={`rounded-2xl p-6 text-white shadow-card sm:p-8 ${question.boss_round ? 'bg-indigo-950' : 'bg-navy-900'}`}>
-        <p className="flex items-center gap-2 text-sm font-semibold text-teal-200"><Gamepad2 aria-hidden="true" className="h-5 w-5" />Interview Arena</p>
-        <h1 className="mt-3 text-3xl font-bold">{question.boss_round ? 'Boss Round' : `Level ${session.current_turn}`}</h1>
-        <p className="mt-2 text-sm text-slate-300">Challenge {session.current_turn} of {session.max_turns} · {session.role_title || config.role_title}</p>
-        <div className="mt-5 flex flex-wrap gap-3 font-semibold" aria-live="polite">
-          <span className="rounded-xl bg-white/10 px-4 py-2">XP {game.total_xp}</span>
-          <span className="rounded-xl bg-white/10 px-4 py-2">Streak {game.current_streak}</span>
-          <span className="rounded-xl bg-white/10 px-4 py-2">{difficultyLabel(question.difficulty)}</span>
-          {question.is_follow_up && <span className="rounded-xl bg-teal-800 px-4 py-2">AI Follow-up</span>}
+    <div className="mx-auto max-w-4xl space-y-5">
+      {/* HUD */}
+      <header
+        key={`hud-${session.current_turn}`}
+        className={`reveal rounded-panel border p-6 sm:p-7 ${boss ? 'border-ink bg-ink text-paper' : 'border-line bg-surface'}`}
+      >
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className={`flex items-center gap-2 text-[13px] ${boss ? 'text-paper/55' : 'text-ink-3'}`}>
+              <Gamepad2 aria-hidden="true" className="h-4 w-4" />
+              Challenge {session.current_turn} of {session.max_turns} · {session.role_title || config.role_title}
+            </p>
+            <h1 className="mt-2 font-serif text-[2.8rem] leading-none">{boss ? 'Boss Round' : `Level ${session.current_turn}`}</h1>
+          </div>
+          <div className="relative flex flex-wrap gap-2 text-[13px] font-medium" aria-live="polite">
+            <span className={`num rounded-full px-3 py-1.5 font-mono ${boss ? 'bg-paper/10' : 'bg-sunken'}`}>XP {game.total_xp}</span>
+            <span className={`num rounded-full px-3 py-1.5 font-mono ${boss ? 'bg-paper/10' : 'bg-sunken'}`}>Streak {game.current_streak}</span>
+            <span className={`rounded-full px-3 py-1.5 ${boss ? 'bg-paper text-ink' : 'bg-ink text-paper'}`}>{difficultyLabel(question.difficulty)}</span>
+            {question.is_follow_up && <span className={`rounded-full border px-3 py-1.5 ${boss ? 'border-paper/30' : 'border-line-strong'}`}>AI Follow-up</span>}
+            {result && game.xp_earned > 0 && (
+              <span aria-hidden="true" className="float-up pointer-events-none absolute -top-6 left-2 font-mono text-sm font-semibold">+{game.xp_earned}</span>
+            )}
+          </div>
+        </div>
+        <div className="mt-6 flex gap-1.5" aria-hidden="true">
+          {Array.from({ length: totalLevels }, (_, index) => {
+            const level = index + 1;
+            const done = level < session.current_turn || (level === session.current_turn && result);
+            const current = level === session.current_turn && !result;
+            return (
+              <span key={level} className={`relative h-1.5 flex-1 overflow-hidden rounded-full ${boss ? 'bg-paper/15' : 'bg-line'}`}>
+                {(done || current) && (
+                  <span className={`grow-x absolute inset-0 rounded-full ${boss ? 'bg-paper' : 'bg-ink'} ${current ? 'opacity-40' : ''}`} />
+                )}
+              </span>
+            );
+          })}
         </div>
       </header>
-      {result ? <section className="card p-6 sm:p-8" aria-labelledby="answer-result">
-        <h2 id="answer-result" className="text-2xl font-bold text-slate-900">Answer Result</h2>
-        <p className="mt-3 text-lg font-semibold">Answer Score: {result.evaluation.answer_quality_score} / 100</p>
-        <dl className="my-6 space-y-3 rounded-xl bg-slate-50 p-5 text-sm">
-          {[['Base Answer XP', game.base_xp], [`${difficultyLabel(question.difficulty)} Difficulty Bonus`, game.difficulty_bonus], ['Streak Bonus', game.streak_bonus], ['Hint Penalty', -game.hint_penalty]].map(([label, value]) => <div key={label} className="flex justify-between gap-4"><dt>{label}</dt><dd>{value >= 0 ? '+' : ''}{value}</dd></div>)}
-          <div className="flex justify-between border-t border-slate-200 pt-3 text-lg font-bold"><dt>XP Earned</dt><dd>{game.xp_earned} XP</dd></div>
-        </dl>
-        <h3 className="font-semibold">Feedback</h3>
-        <p className="mt-2 leading-7 text-slate-600">{result.evaluation.feedback || 'No evaluator feedback was available.'}</p>
-        {result.evaluation.evaluation_source === 'fallback' && <p className="mt-3 text-sm text-amber-700">Approximate evaluation: the AI evaluator was unavailable for this answer.</p>}
-        <button className="primary-btn mt-6" onClick={nextChallenge}>{result.is_complete ? 'Finish Arena' : 'Next Challenge'}</button>
-      </section> : <section className="card p-6 sm:p-8">
-        <p className="text-sm font-semibold text-tealish-700">{question.topic}</p>
-        <h2 className="mt-2 text-xl font-bold leading-8 text-slate-900">{question.question}</h2>
-        <label htmlFor="arena-answer" className="mt-6 block text-sm font-semibold text-slate-700">Your answer</label>
-        <textarea id="arena-answer" rows={7} value={answer} disabled={locked} onChange={(event) => setAnswer(event.target.value)} className="input-field mt-2" placeholder="Explain your approach and reasoning…" />
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button className="secondary-btn" onClick={requestHint} disabled={locked || game.remaining_hints === 0}>Use Hint</button>
-          <span className="text-sm text-slate-500">{game.remaining_hints} {game.remaining_hints === 1 ? 'Hint' : 'Hints'}</span>
-          <span className="text-xs text-slate-500">One hint per session · −20 XP on this turn</span>
-        </div>
-        {hint && <p className="mt-4 rounded-xl bg-tealish-50 p-4 text-sm text-slate-700">{hint}</p>}
-        {error && <p role="alert" className="mt-4 rounded-xl bg-amber-50 p-4 text-sm text-amber-800">{error}</p>}
-        {responseRef.current && <p className="mt-3 text-sm text-slate-500">Answer saved and locked.</p>}
-        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
-          <p role="status" className="text-sm text-slate-500">{phase === 'advancing' ? 'Preparing your result and next challenge…' : phase === 'hint' ? 'Preparing your hint…' : ''}</p>
-          <button className="primary-btn" onClick={submit} disabled={busy || (!responseRef.current && !answer.trim())}>
-            {phase === 'submitting' ? 'Analyzing your answer…' : phase === 'advancing' ? 'Preparing your result…' : phase === 'advance-error' ? 'Retry Advancement' : phase === 'submit-error' ? 'Retry Submission' : 'Submit Answer'}
-          </button>
-        </div>
-      </section>}
+
+      {result ? (
+        <Panel key="result" className="scale-in overflow-hidden" aria-labelledby="answer-result">
+          <div className="grid gap-6 p-6 sm:grid-cols-[minmax(0,1fr)_260px] sm:p-8">
+            <div>
+              <h2 id="answer-result" className="text-[15px] font-semibold text-ink">Answer Result</h2>
+              <p className="mt-4 flex items-baseline gap-2">
+                <span className="num font-serif text-7xl leading-none text-ink"><CountUp value={result.evaluation.answer_quality_score} /></span>
+                <span className="text-ink-3">/ 100</span>
+              </p>
+              <p className="sr-only">Answer Score: {result.evaluation.answer_quality_score} / 100</p>
+              <h3 className="mt-6 text-[13px] text-ink-3">Feedback</h3>
+              <p className="mt-1.5 leading-relaxed text-ink-2">{result.evaluation.feedback || 'No evaluator feedback was available.'}</p>
+              {result.evaluation.evaluation_source === 'fallback' && <p className="mt-3 text-[13px] text-warn">Approximate evaluation: the AI evaluator was unavailable for this answer.</p>}
+            </div>
+            <dl className="self-start rounded-control border border-line bg-paper p-4 text-[13px]">
+              {[['Base Answer XP', game.base_xp], [`${difficultyLabel(question.difficulty)} Difficulty Bonus`, game.difficulty_bonus], ['Streak Bonus', game.streak_bonus], ['Hint Penalty', -game.hint_penalty]].map(([label, value]) => (
+                <div key={label} className="flex justify-between gap-4 py-1.5">
+                  <dt className="text-ink-2">{label}</dt>
+                  <dd className="num font-mono text-ink">{value >= 0 ? '+' : ''}{value}</dd>
+                </div>
+              ))}
+              <div className="mt-2 flex justify-between border-t border-line pt-3 text-sm font-semibold">
+                <dt>XP Earned</dt>
+                <dd className="num font-mono">{game.xp_earned} XP</dd>
+              </div>
+            </dl>
+          </div>
+          <div className="flex justify-end border-t border-line bg-paper/60 px-6 py-4 sm:px-8">
+            <button className="primary-btn" onClick={nextChallenge}>
+              {result.is_complete ? 'Finish Arena' : 'Next Challenge'} <ArrowRight aria-hidden="true" className="h-4 w-4" />
+            </button>
+          </div>
+        </Panel>
+      ) : (
+        <Panel key={`question-${question.index}`} className="p-6 sm:p-8">
+          <p className="text-[13px] text-ink-3">{question.topic}</p>
+          <h2 className="mt-2 font-serif text-[1.75rem] leading-snug text-ink">{question.question}</h2>
+          <label htmlFor="arena-answer" className="field-label mt-7">Your answer</label>
+          <textarea id="arena-answer" rows={7} value={answer} disabled={locked} onChange={(event) => setAnswer(event.target.value)} className="input-field !text-[15px] leading-relaxed" placeholder="Explain your approach and reasoning…" />
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button className="secondary-btn !py-2" onClick={requestHint} disabled={locked || game.remaining_hints === 0}>
+              <Lightbulb aria-hidden="true" className="h-4 w-4" /> Use Hint
+            </button>
+            <span className="text-[13px] text-ink-2">{game.remaining_hints} {game.remaining_hints === 1 ? 'Hint' : 'Hints'}</span>
+            <span className="text-xs text-ink-3">One per session · −20 XP on this turn</span>
+          </div>
+          {hint && <Notice className="mt-4">{hint}</Notice>}
+          {error && <Notice tone="warn" role="alert" className="mt-4">{error}</Notice>}
+          {responseRef.current && <p className="mt-3 text-[13px] text-ink-3">Answer saved and locked.</p>}
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-5">
+            <p role="status" className="flex items-center gap-2 text-[13px] text-ink-2">
+              {(phase === 'advancing' || phase === 'hint') && <Spinner className="h-3.5 w-3.5" />}
+              {phase === 'advancing' ? 'Preparing your result and next challenge…' : phase === 'hint' ? 'Preparing your hint…' : ''}
+            </p>
+            <button className="primary-btn" onClick={submit} disabled={busy || (!responseRef.current && !answer.trim())}>
+              {phase === 'submitting' ? 'Analyzing your answer…' : phase === 'advancing' ? 'Preparing your result…' : phase === 'advance-error' ? 'Retry Advancement' : phase === 'submit-error' ? 'Retry Submission' : 'Submit Answer'}
+            </button>
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
