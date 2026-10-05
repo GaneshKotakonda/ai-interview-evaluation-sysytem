@@ -229,7 +229,7 @@ export default function Profile() {
             {displayName.charAt(0).toUpperCase()}
           </div>
           <div className="min-w-0">
-            <h1 className="truncate font-serif text-[2.6rem] leading-none text-ink">{displayName}</h1>
+            <h1 className="truncate font-serif text-[2.25rem] tracking-[-0.02em] leading-none text-ink">{displayName}</h1>
             <p className="mt-2 truncate text-sm text-ink-2">{user?.email}</p>
             <p className="mt-1 text-xs text-ink-3">
               Member since {formatDate(user?.metadata?.creationTime)}

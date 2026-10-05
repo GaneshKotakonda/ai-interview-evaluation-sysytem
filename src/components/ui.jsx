@@ -38,7 +38,7 @@ export function PageHeader({ kicker, title, description, actions }) {
     <header className="reveal flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
         {kicker && <p className="text-[13px] text-ink-3">{kicker}</p>}
-        <h1 className="mt-1 font-serif text-[2.6rem] leading-[1.05] tracking-[-0.01em] text-ink sm:text-[3rem]">{title}</h1>
+        <h1 className="mt-1 font-serif text-[2.25rem] leading-[1.1] tracking-[-0.02em] text-ink sm:text-[2.6rem]">{title}</h1>
         {description && <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-ink-2">{description}</p>}
       </div>
       {actions && <div className="flex shrink-0 flex-wrap gap-2">{actions}</div>}
@@ -173,7 +173,7 @@ export function Stat({ label, value, hint, suffix = '' }) {
   const numeric = typeof value === 'number' && Number.isFinite(value);
   return (
     <div data-stat={label} className="min-w-0 px-5 py-5 sm:px-6">
-      <p data-stat-value className="num font-serif text-[2.6rem] leading-none text-ink">
+      <p data-stat-value className="num font-serif text-[2.2rem] tracking-[-0.02em] leading-none text-ink">
         {numeric ? <CountUp value={value} suffix={suffix} /> : value}
       </p>
       <p className="mt-3 text-[13px] font-medium text-ink-2">{label}</p>

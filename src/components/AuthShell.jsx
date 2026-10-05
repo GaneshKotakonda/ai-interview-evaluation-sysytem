@@ -30,7 +30,7 @@ export default function AuthShell({ title, description, children, footer }) {
         <Brand />
         <div className="flex flex-1 items-center py-12">
           <div className="page-enter mx-auto w-full max-w-[380px]">
-            <h1 className="font-serif text-[2.75rem] leading-[1.05] text-ink">{title}</h1>
+            <h1 className="font-serif text-[2.1rem] tracking-[-0.02em] tracking-[-0.02em] leading-[1.05] text-ink">{title}</h1>
             {description && <p className="mt-3 text-[15px] leading-relaxed text-ink-2">{description}</p>}
             <div className="mt-8">{children}</div>
             {footer && <p className="mt-8 text-sm text-ink-3">{footer}</p>}
@@ -59,14 +59,14 @@ export default function AuthShell({ title, description, children, footer }) {
                 Recording
               </span>
             </div>
-            <p className="mt-4 font-serif text-[1.75rem] leading-snug">
+            <p className="mt-4 font-serif text-[1.5rem] leading-snug">
               “You mentioned caching the session data. What happens when two servers disagree about it?”
             </p>
             <div className="mt-6">
               <Waveform />
             </div>
           </div>
-          <p className="reveal mt-10 font-serif text-[2.4rem] leading-[1.1]" style={{ '--i': 4 }}>
+          <p className="reveal mt-10 font-serif text-[2.1rem] tracking-[-0.02em] leading-[1.1]" style={{ '--i': 4 }}>
             Rehearse the conversation,
             <span className="italic text-paper/60"> not the script.</span>
           </p>

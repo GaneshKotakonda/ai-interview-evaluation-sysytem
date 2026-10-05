@@ -70,7 +70,7 @@ export default function ArenaResults() {
         <div className="flex flex-col justify-between gap-8 bg-ink p-7 text-paper">
           <Trophy aria-hidden="true" className="h-6 w-6 text-paper/60" />
           <div>
-            <p className="num font-serif text-[5rem] leading-[0.85]"><CountUp value={results.total_xp} duration={1200} /></p>
+            <p className="num font-serif text-[4.25rem] tracking-[-0.03em] leading-[0.85]"><CountUp value={results.total_xp} duration={1200} /></p>
             <p className="mt-3 text-[13px] text-paper/60">Total XP</p>
           </div>
         </div>

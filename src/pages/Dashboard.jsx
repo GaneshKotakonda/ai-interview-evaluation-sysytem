@@ -61,7 +61,7 @@ function ModeCard({ dark = false, index, title, description, meta, action, i }) 
         <span className={`num font-mono text-xs ${dark ? 'text-paper/50' : 'text-ink-3'}`}>{index}</span>
         <ArrowUpRight className={`h-4 w-4 transition duration-300 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 ${dark ? 'text-paper/50' : 'text-ink-4'}`} />
       </div>
-      <h2 className="mt-8 font-serif text-[2rem] leading-none">{title}</h2>
+      <h2 className="mt-8 font-serif text-[1.75rem] tracking-[-0.01em] leading-none">{title}</h2>
       <p className={`mt-3 max-w-md text-sm leading-relaxed ${dark ? 'text-paper/65' : 'text-ink-2'}`}>{description}</p>
       <ul className={`mb-7 mt-5 flex flex-wrap gap-x-4 gap-y-1 text-[13px] ${dark ? 'text-paper/55' : 'text-ink-3'}`}>
         {meta.map((item) => (

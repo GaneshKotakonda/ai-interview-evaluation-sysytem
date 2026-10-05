@@ -455,7 +455,7 @@ export default function Interview() {
               <span>{targetRole}</span>
               {targetJd && <Badge tone="ink">Tailored to JD</Badge>}
             </div>
-            <h1 className="mt-1 font-serif text-[2.4rem] leading-none text-ink">
+            <h1 className="mt-1 font-serif text-[2.1rem] tracking-[-0.02em] leading-none text-ink">
               Question {currentTurn} of {maxTurns}
             </h1>
           </div>
@@ -499,7 +499,7 @@ export default function Interview() {
               {currentQuestion.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
               {currentQuestion.topic && <span className="text-ink-3">{currentQuestion.topic}</span>}
             </div>
-            <h2 className="mt-4 font-serif text-[1.75rem] leading-snug text-ink sm:text-[2rem]">
+            <h2 className="mt-4 font-serif text-[1.5rem] leading-snug text-ink sm:text-[1.75rem]">
               {currentQuestionText}
             </h2>
           </Panel>

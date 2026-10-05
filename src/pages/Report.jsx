@@ -66,7 +66,7 @@ function OverallScore({ score }) {
     <div className="flex h-full flex-col">
       <p className="text-[13px] text-ink-3">Overall score</p>
       <div className="mt-3 flex items-baseline gap-2">
-        <span className="num font-serif text-[5.5rem] leading-[0.85] text-ink">
+        <span className="num font-serif text-[4.5rem] tracking-[-0.03em] leading-[0.85] text-ink">
           {hasScore ? <CountUp value={score} duration={1100} /> : '—'}
         </span>
         <span className="text-lg text-ink-3">/ 100</span>
@@ -254,7 +254,7 @@ export default function Report() {
 
       <Panel i={2} className="p-6 sm:p-8">
         <p className="text-[13px] text-ink-3">Summary Feedback</p>
-        <blockquote className="mt-3 font-serif text-[1.6rem] leading-snug text-ink">“{summary}”</blockquote>
+        <blockquote className="mt-3 font-serif text-[1.4rem] leading-snug text-ink">“{summary}”</blockquote>
       </Panel>
 
       {journey.length > 0 && <AdaptiveJourney turns={journey} />}

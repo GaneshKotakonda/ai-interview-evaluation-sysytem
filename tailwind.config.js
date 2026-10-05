@@ -22,7 +22,7 @@ export default {
       },
       fontFamily: {
         sans: ['Geist', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
-        serif: ['"Instrument Serif"', 'ui-serif', 'Georgia', 'serif'],
+        serif: ['Fraunces', 'ui-serif', 'Georgia', 'serif'],
         mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       borderRadius: {

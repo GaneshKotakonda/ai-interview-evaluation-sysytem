@@ -192,7 +192,7 @@ export default function ArenaPlay() {
               <Gamepad2 aria-hidden="true" className="h-4 w-4" />
               Challenge {session.current_turn} of {session.max_turns} · {session.role_title || config.role_title}
             </p>
-            <h1 className="mt-2 font-serif text-[2.8rem] leading-none">{boss ? 'Boss Round' : `Level ${session.current_turn}`}</h1>
+            <h1 className="mt-2 font-serif text-[2.4rem] tracking-[-0.02em] leading-none">{boss ? 'Boss Round' : `Level ${session.current_turn}`}</h1>
           </div>
           <div className="relative flex flex-wrap gap-2 text-[13px] font-medium" aria-live="polite">
             <span className={`num rounded-full px-3 py-1.5 font-mono ${boss ? 'bg-paper/10' : 'bg-sunken'}`}>XP {game.total_xp}</span>
@@ -226,7 +226,7 @@ export default function ArenaPlay() {
             <div>
               <h2 id="answer-result" className="text-[15px] font-semibold text-ink">Answer Result</h2>
               <p className="mt-4 flex items-baseline gap-2">
-                <span className="num font-serif text-7xl leading-none text-ink"><CountUp value={result.evaluation.answer_quality_score} /></span>
+                <span className="num font-serif text-6xl leading-none text-ink"><CountUp value={result.evaluation.answer_quality_score} /></span>
                 <span className="text-ink-3">/ 100</span>
               </p>
               <p className="sr-only">Answer Score: {result.evaluation.answer_quality_score} / 100</p>
@@ -256,7 +256,7 @@ export default function ArenaPlay() {
       ) : (
         <Panel key={`question-${question.index}`} className="p-6 sm:p-8">
           <p className="text-[13px] text-ink-3">{question.topic}</p>
-          <h2 className="mt-2 font-serif text-[1.75rem] leading-snug text-ink">{question.question}</h2>
+          <h2 className="mt-2 font-serif text-[1.5rem] leading-snug text-ink">{question.question}</h2>
           <label htmlFor="arena-answer" className="field-label mt-7">Your answer</label>
           <textarea id="arena-answer" rows={7} value={answer} disabled={locked} onChange={(event) => setAnswer(event.target.value)} className="input-field !text-[15px] leading-relaxed" placeholder="Explain your approach and reasoning…" />
           <div className="mt-4 flex flex-wrap items-center gap-3">

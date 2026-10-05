@@ -147,7 +147,7 @@ export default function InterviewComplete() {
             <circle cx="32" cy="32" r="29" fill="none" stroke="#171611" strokeWidth="2" pathLength="100" className="draw" style={{ '--len': 100 }} />
             <path d="M20 33 l8 8 l16 -17" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />
           </svg>
-          <h1 className="reveal mt-6 font-serif text-[2.75rem] leading-none text-ink" style={{ '--i': 2 }}>Interview complete</h1>
+          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>Interview complete</h1>
           <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
             Your answers and recordings are saved. We are combining every turn into your final report.
           </p>
