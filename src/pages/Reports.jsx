@@ -26,6 +26,13 @@ const COMPONENTS = [
   { key: 'camera_engagement_score', label: 'Camera Engagement', short: 'Camera' },
 ];
 
+const CRITERIA = [
+  { key: 'correctness', label: 'Correctness' },
+  { key: 'completeness', label: 'Completeness' },
+  { key: 'technical_depth', label: 'Technical depth' },
+  { key: 'relevance', label: 'Relevance' },
+];
+
 const hasValue = (value) => value !== null && value !== undefined;
 
 // Average of the non-null values, or null when there are none (e.g. camera
@@ -175,6 +182,9 @@ export default function Reports() {
   const componentAverages = COMPONENTS
     .map(({ key, label }) => ({ label, value: average(reports.map((report) => report[key])) }))
     .filter((item) => item.value !== null);
+  const criteriaAverages = CRITERIA
+    .map(({ key, label }) => ({ label, value: average(reports.map((report) => report.criteria_scores?.[key])) }))
+    .filter((item) => item.value !== null);
   const latest = trendPoints[trendPoints.length - 1]?.score;
   const previous = trendPoints[trendPoints.length - 2]?.score;
   const strengths = topItems(reports, 'strengths');
@@ -230,6 +240,14 @@ export default function Reports() {
               <div className="mt-6 space-y-5">
                 {componentAverages.map((item, index) => <ProgressBar key={item.label} {...item} i={index} />)}
               </div>
+              {criteriaAverages.length > 0 && (
+                <>
+                  <p className="mt-7 border-t border-line pt-5 text-[13px] font-medium text-ink-2">Answer criteria</p>
+                  <div className="mt-4 space-y-4">
+                    {criteriaAverages.map((item, index) => <ProgressBar key={item.label} {...item} compact i={index + 4} />)}
+                  </div>
+                </>
+              )}
             </Panel>
           </section>
 

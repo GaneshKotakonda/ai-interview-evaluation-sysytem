@@ -115,7 +115,9 @@ export default function InterviewComplete() {
       label: 'Communication Analysis',
       state: evaluating
         ? 'Combining saved communication metrics...'
-        : `${totalFillers} filler words analysed`,
+        : evaluationReport?.speech_metrics?.words_per_minute
+          ? `${evaluationReport.speech_metrics.words_per_minute} words/min · ${evaluationReport.speech_metrics.fillers_per_minute} fillers/min`
+          : `${totalFillers} filler words analysed`,
       complete: !evaluating && !evaluationError,
     },
     {

@@ -53,6 +53,29 @@ async function request(url, { method = 'GET', json, formData } = {}, failureMess
   return response.json();
 }
 
+// File extension that matches what the browser actually recorded
+// (Chrome/Firefox: webm, Safari: mp4).
+function extensionFor(blob) {
+  const type = blob?.type || '';
+  if (type.includes('mp4')) return 'mp4';
+  if (type.includes('ogg')) return 'ogg';
+  return 'webm';
+}
+
+// Authenticated binary download (recordings).
+async function requestBlob(url, failureMessage) {
+  const headers = {};
+  const token = await authTokenProvider();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    const error = new Error(failureMessage);
+    error.status = response.status;
+    throw error;
+  }
+  return response.blob();
+}
+
 export const api = {
   // 1. Create a session and receive the first adaptive question.
   startInterview(
@@ -63,6 +86,7 @@ export const api = {
     fullName = null,
     maxTurns = 5,
     interviewMode = 'standard',
+    answerMode = 'typed',
   ) {
     return request(`${API_BASE_URL}/api/interviews/start`, {
       method: 'POST',
@@ -74,22 +98,90 @@ export const api = {
         job_description: jobDescription || null,
         max_turns: maxTurns,
         interview_mode: interviewMode,
+        ...(interviewMode === 'standard' ? { answer_mode: answerMode } : {}),
       },
     }, 'Failed to start interview');
   },
 
-  // 2. Submit one answer (text + optional recorded video). The backend grades
-  // it immediately; resubmitting the same text returns the original result.
-  submitAnswer(interviewId, { questionIndex, questionText, candidateAnswer, videoBlob }) {
+  // 2. Submit one answer (text + optional recorded video and this answer's
+  // camera-engagement snapshot). The backend grades it immediately;
+  // resubmitting the same text returns the original result.
+  // `recording` = { part, start, end } locates the answer (in seconds) inside
+  // the whole-interview recording, for playback from the report.
+  submitAnswer(interviewId, { questionIndex, questionText, candidateAnswer, videoBlob, visionMetrics, recording }) {
     const formData = new FormData();
     formData.append('question_index', questionIndex);
     formData.append('question_text', questionText);
     formData.append('candidate_answer', candidateAnswer || '');
     if (videoBlob) {
-      formData.append('video', videoBlob, `q_${questionIndex}.webm`);
+      formData.append('video', videoBlob, `q_${questionIndex}.${extensionFor(videoBlob)}`);
+    }
+    if (visionMetrics) {
+      formData.append('vision_metrics', JSON.stringify(visionMetrics));
+    }
+    if (recording) {
+      formData.append('recording_part', recording.part);
+      formData.append('answer_start_seconds', recording.start);
+      formData.append('answer_end_seconds', recording.end);
     }
     return request(interviewPath(interviewId, 'submit-answer'), { method: 'POST', formData },
       'Failed to submit answer');
+  },
+
+  // 2b. Speech-to-text for a recorded answer. Returns the transcript for the
+  // candidate to review; it does not grade. Re-recording replaces it.
+  transcribeAnswer(interviewId, questionIndex, audioBlob) {
+    const formData = new FormData();
+    formData.append('question_index', questionIndex);
+    formData.append('audio', audioBlob, `q_${questionIndex}_audio.${extensionFor(audioBlob)}`);
+    return request(interviewPath(interviewId, 'transcribe'), { method: 'POST', formData },
+      'Failed to transcribe answer');
+  },
+
+  // 2e. One chunk of the whole-interview recording (sent every ~10 s).
+  uploadRecordingChunk(interviewId, part, seq, blob) {
+    const formData = new FormData();
+    formData.append('part', part);
+    formData.append('seq', seq);
+    formData.append('chunk', blob, `session_${part}_${seq}.${extensionFor(blob)}`);
+    return request(interviewPath(interviewId, 'recording'), { method: 'POST', formData },
+      'Failed to upload recording');
+  },
+
+  // 2f. Owner-only whole-interview recording (one part) as an object URL.
+  async getRecordingUrl(interviewId, part) {
+    const blob = await requestBlob(interviewPath(interviewId, `recording/${encodeURIComponent(part)}`),
+      'Failed to load recording');
+    return URL.createObjectURL(blob);
+  },
+
+  // 2g. Spoken interviewer audio (Piper). `item`: intro | outro | question-<n>.
+  async getSpeechUrl(interviewId, item) {
+    const blob = await requestBlob(interviewPath(interviewId, `speech/${encodeURIComponent(item)}`),
+      'Speech unavailable');
+    return URL.createObjectURL(blob);
+  },
+
+  // 2h. Fixed spoken phrase (speaker test, "thank you", …).
+  async getPhraseUrl(phrase) {
+    const blob = await requestBlob(`${API_BASE_URL}/api/speech/${encodeURIComponent(phrase)}`,
+      'Speech unavailable');
+    return URL.createObjectURL(blob);
+  },
+
+  // 2c. Current state of an active interview, used to resume after a reload.
+  getInterviewState(interviewId) {
+    return request(interviewPath(interviewId, 'state'), {}, 'Failed to load interview');
+  },
+
+  // 2d. Owner-only recording of one answer, as an object URL for <video>/<audio>.
+  // The caller revokes the URL when it is no longer shown.
+  async getAnswerMediaUrl(interviewId, questionIndex, kind = 'video') {
+    const blob = await requestBlob(
+      `${interviewPath(interviewId, `media/${encodeURIComponent(questionIndex)}`)}?kind=${kind}`,
+      'Failed to load recording',
+    );
+    return URL.createObjectURL(blob);
   },
 
   // 3. Advance after submitAnswer. Passing its response_id makes delayed

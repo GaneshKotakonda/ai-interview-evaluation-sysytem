@@ -6,8 +6,8 @@ import os
 import sys
 import pytest
 
-# Add project backend directory to Python path
-PROJECT_BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend")
+# This file lives in backend/, next to the module under test
+PROJECT_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_BACKEND_DIR not in sys.path:
     sys.path.insert(0, PROJECT_BACKEND_DIR)
 

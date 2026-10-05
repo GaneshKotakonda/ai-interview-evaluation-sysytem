@@ -11,7 +11,14 @@ export const STORAGE_KEYS = {
   roleTitle: 'target-role-title',             // chosen on the Readiness page
   jobDescription: 'target-job-description',
   arenaInterviewId: 'arena-interview-id',     // sessionStorage: last Arena UUID
+  answerMode: 'interview-answer-mode',        // 'voice' (default) or 'typed', chosen on Readiness
 };
+
+// How the candidate answers: spoken (default) or typed (accessibility /
+// no microphone). Chosen on the Readiness page.
+export function readAnswerMode() {
+  return localStorage.getItem(STORAGE_KEYS.answerMode) === 'typed' ? 'typed' : 'voice';
+}
 
 // Forget everything about the previous Standard interview.
 export function clearInterviewProgress() {

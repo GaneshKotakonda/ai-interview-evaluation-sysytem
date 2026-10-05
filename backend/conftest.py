@@ -22,6 +22,15 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _never_call_real_gemini():
+    """backend/.env may hold a real key; tests must never use the network."""
+    import config
+    import gemini_service
+    with patch.object(config, "GEMINI_API_KEY", ""), patch.object(gemini_service, "_client", None):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _skip_ownership_lookup(request):
     if request.node.get_closest_marker("real_auth"):
         yield

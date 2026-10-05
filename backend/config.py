@@ -71,6 +71,32 @@ CORS_ORIGINS = _env_list(
 # VITE_FIREBASE_PROJECT_ID). Requests must carry a token from this project.
 FIREBASE_PROJECT_ID = _env_str("FIREBASE_PROJECT_ID", "ai-evaluation-40c8a")
 
+# Speech-to-text (stt_service.py). faster-whisper runs locally and is open
+# source (MIT). STT_PROVIDER: "whisper" (default), "gemini" (send audio to
+# Gemini) or "off". Whisper falls back to Gemini when a key is configured.
+STT_PROVIDER = _env_str("STT_PROVIDER", "whisper").lower()
+# Model size: tiny.en, base.en (default), small.en, medium.en, large-v3 ...
+STT_MODEL = _env_str("STT_MODEL", "base.en")
+STT_DEVICE = _env_str("STT_DEVICE", "cpu")
+# int8 keeps CPU memory and latency low; use float16 on a GPU.
+STT_COMPUTE_TYPE = _env_str("STT_COMPUTE_TYPE", "int8")
+STT_LANGUAGE = _env_str("STT_LANGUAGE", "en")
+# Answers longer than this are rejected before transcription.
+STT_MAX_AUDIO_SECONDS = _env_int("STT_MAX_AUDIO_SECONDS", 600)
+
+# Text-to-speech (tts_service.py): Piper, an open-source neural voice that
+# runs locally. TTS_PROVIDER: "piper" (default) or "off" (the browser then
+# falls back to its own speech synthesis).
+TTS_PROVIDER = _env_str("TTS_PROVIDER", "piper").lower()
+PIPER_VOICE = _env_str("PIPER_VOICE", "en_US-lessac-medium")
+PIPER_VOICE_DIR = _env_str("PIPER_VOICE_DIR", os.path.join(BACKEND_DIR, "voices"))
+# >1 speaks more slowly; interview questions read slightly slower than default.
+PIPER_LENGTH_SCALE = float(_env_str("PIPER_LENGTH_SCALE", "1.05"))
+TTS_CACHE_DIR = _env_str("TTS_CACHE_DIR", os.path.join(BACKEND_DIR, "tts_cache"))
+
+# Whole-interview recording, uploaded in chunks while the interview runs.
+MAX_SESSION_RECORDING_MB = _env_int("MAX_SESSION_RECORDING_MB", 800)
+
 # Largest answer video accepted by /submit-answer, in megabytes.
 MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", 200)
 

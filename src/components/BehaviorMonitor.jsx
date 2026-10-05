@@ -8,7 +8,22 @@ import { analyzeFaceResult, createVisionStats, getFaceLandmarker, metricsSnapsho
 // face was present / looking at the screen / facing the camera, and reports
 // a snapshot to the parent through onMetricsChange. No video leaves the
 // browser from this component; only the aggregated percentages are used.
+//
+// Two tallies are kept: one for the whole session and one for the current
+// question (`segmentKey`), which resets whenever the question changes, so
+// each submitted answer carries its own camera metrics.
 const SAMPLE_INTERVAL_MS = 200;
+
+// Add one observation of `elapsed` milliseconds to a tally.
+function record(stats, observation, elapsed, newMultipleFaceEvent) {
+  stats.observedMs += elapsed;
+  stats.framesAnalyzed += 1;
+  if (observation.facePresent) stats.facePresentMs += elapsed;
+  if (observation.eyeContact) stats.eyeContactMs += elapsed;
+  if (observation.headCentered) stats.headCenteredMs += elapsed;
+  if (newMultipleFaceEvent) stats.multipleFaceEvents += 1;
+  stats.expressionMs[observation.expression] = (stats.expressionMs[observation.expression] || 0) + elapsed;
+}
 
 // One live reading: label, value and (for percentages) a thin bar.
 function Metric({ label, value, percent }) {
@@ -27,10 +42,11 @@ function Metric({ label, value, percent }) {
   );
 }
 
-export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
+export default function BehaviorMonitor({ videoRef, active, onMetricsChange, segmentKey }) {
   const [status, setStatus] = useState('Loading vision model…');
   const [metrics, setMetrics] = useState(null);
   const statsRef = useRef(createVisionStats());
+  const segmentStatsRef = useRef(createVisionStats());
   const previousTimeRef = useRef(null);
   const animationRef = useRef(null);
   const timeoutRef = useRef(null);
@@ -41,6 +57,12 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
   useEffect(() => {
     onMetricsChangeRef.current = onMetricsChange;
   }, [onMetricsChange]);
+
+  // A new question starts a fresh per-answer tally.
+  useEffect(() => {
+    segmentStatsRef.current = createVisionStats();
+    setMetrics(null);
+  }, [segmentKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,23 +96,20 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
           try {
             const result = landmarker.detectForVideo(video, Math.round(now));
             const observation = analyzeFaceResult(result);
-            const stats = statsRef.current;
-
-            stats.observedMs += elapsed;
-            stats.framesAnalyzed += 1;
-            if (observation.facePresent) stats.facePresentMs += elapsed;
-            if (observation.eyeContact) stats.eyeContactMs += elapsed;
-            if (observation.headCentered) stats.headCenteredMs += elapsed;
             const multipleFacesNow = observation.faceCount > 1;
-            if (multipleFacesNow && !previousMultipleFaceRef.current) stats.multipleFaceEvents += 1;
+            const newMultipleFaceEvent = multipleFacesNow && !previousMultipleFaceRef.current;
             previousMultipleFaceRef.current = multipleFacesNow;
-            stats.expressionMs[observation.expression] = (stats.expressionMs[observation.expression] || 0) + elapsed;
+            record(statsRef.current, observation, elapsed, newMultipleFaceEvent);
+            record(segmentStatsRef.current, observation, elapsed, newMultipleFaceEvent);
 
-            const snapshot = metricsSnapshot(stats);
-            setMetrics({ ...snapshot, faceCount: observation.faceCount, expression: observation.expression });
-            onMetricsChangeRef.current?.(snapshot);
+            const answerSnapshot = metricsSnapshot(segmentStatsRef.current);
+            const sessionSnapshot = metricsSnapshot(statsRef.current);
+            setMetrics({ ...answerSnapshot, faceCount: observation.faceCount, expression: observation.expression });
+            onMetricsChangeRef.current?.(sessionSnapshot, answerSnapshot);
           } catch (error) {
-            setStatus(error?.message || 'Vision analysis error');
+            // Technical detail goes to the console, not to the candidate.
+            console.warn('Camera analysis error', error);
+            setStatus('Camera analysis paused; the interview continues normally.');
           }
 
           // Throttle: wait SAMPLE_INTERVAL_MS, then sync with the next frame.
@@ -101,7 +120,10 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
 
         animationRef.current = requestAnimationFrame(loop);
       } catch (error) {
-        if (!cancelled) setStatus(`Vision unavailable: ${error?.message || 'model failed to load'}`);
+        if (!cancelled) {
+          console.warn('Camera analysis unavailable', error);
+          setStatus('Camera analysis unavailable in this browser; your interview is not affected.');
+        }
       }
     };
 
@@ -120,7 +142,7 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-[15px] font-semibold text-ink">Camera Engagement</h2>
-          <p className="mt-0.5 text-xs text-ink-3">{status}</p>
+          <p className="mt-0.5 text-xs text-ink-3">This answer · {status}</p>
         </div>
         <span className={`mt-1.5 h-2 w-2 rounded-full ${status === 'Live analysis active' ? 'bg-ok' : 'bg-warn'}`} />
       </div>

@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Minus, Plus } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, ArrowLeft, Mic, Minus, Play, Plus } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
 import {
-  Badge, CountUp, EmptyState, LoadingBlock, PageHeader, Panel, SectionTitle,
+  Badge, CountUp, EmptyState, LoadingBlock, PageHeader, Panel, SectionTitle, Spinner,
 } from '../components/ui';
 import { api } from '../services/api';
 import { STORAGE_KEYS, readInterviewJourney } from '../utils/interviewJourney';
@@ -100,7 +100,267 @@ function OverallScore({ score }) {
   );
 }
 
-function AdaptiveJourney({ turns }) {
+const CRITERIA = [
+  ['correctness', 'Correctness'],
+  ['completeness', 'Completeness'],
+  ['technical_depth', 'Technical depth'],
+  ['relevance', 'Relevance'],
+];
+const COMPONENT_LABELS = {
+  answer_quality: 'Answer quality',
+  communication: 'Communication',
+  speech_fluency: 'Speech fluency',
+  camera_engagement: 'Camera engagement',
+};
+const present = (value) => value !== null && value !== undefined;
+
+// Small "label value" pair used in metric rows.
+function Figure({ label, value }) {
+  return (
+    <div>
+      <dt className="text-xs text-ink-3">{label}</dt>
+      <dd className="num mt-1 font-mono text-[15px] text-ink">{value}</dd>
+    </div>
+  );
+}
+
+function CriteriaPanel({ criteria, i }) {
+  const rows = CRITERIA.filter(([key]) => present(criteria?.[key]));
+  if (!rows.length) return null;
+  return (
+    <Panel i={i} as="article" className="p-6">
+      <SectionTitle title="Answer criteria" description="Average across every answer, scored by the AI evaluator." />
+      <div className="mt-5 space-y-4">
+        {rows.map(([key, label], index) => <ProgressBar key={key} label={label} value={criteria[key]} i={index} />)}
+      </div>
+    </Panel>
+  );
+}
+
+function DeliveryPanel({ speech, vision, i }) {
+  const hasSpeech = speech && speech.answers_with_audio;
+  const hasVision = vision && present(vision.answers_with_camera);
+  if (!hasSpeech && !hasVision) return null;
+  return (
+    <Panel i={i} as="article" className="p-6">
+      <SectionTitle title="Delivery" description="How the answers were spoken and how you appeared on camera." />
+      {hasSpeech ? (
+        <dl className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Figure label="Pace" value={present(speech.words_per_minute) ? `${speech.words_per_minute} wpm` : '—'} />
+          <Figure label="Fillers" value={present(speech.fillers_per_minute) ? `${speech.fillers_per_minute}/min` : '—'} />
+          <Figure label="Long pauses" value={speech.long_pauses ?? '—'} />
+          <Figure label="Spoken answers" value={speech.answers_with_audio} />
+        </dl>
+      ) : (
+        <p className="mt-4 text-[13px] text-ink-3">Answers were typed, so speech delivery was estimated from filler words in the text.</p>
+      )}
+      {hasVision && (
+        <dl className="mt-5 grid grid-cols-2 gap-4 border-t border-line pt-5 sm:grid-cols-4">
+          <Figure label="Screen gaze" value={present(vision.eyeContact) ? `${vision.eyeContact}%` : '—'} />
+          <Figure label="Face visible" value={present(vision.facePresence) ? `${vision.facePresence}%` : '—'} />
+          <Figure label="Head aligned" value={present(vision.cameraFacing) ? `${vision.cameraFacing}%` : '—'} />
+          <Figure label="Extra faces" value={vision.multipleFaceEvents ?? 0} />
+        </dl>
+      )}
+    </Panel>
+  );
+}
+
+function ScoreMethod({ scoring }) {
+  const weights = scoring?.weights;
+  if (!weights) return null;
+  return (
+    <div className="mt-6 border-t border-line pt-5">
+      <p className="text-xs font-medium text-ink-2">How this score was calculated</p>
+      <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-3">
+        {Object.entries(weights).map(([name, weight]) => (
+          <li key={name}>{COMPONENT_LABELS[name] || name} <span className="num font-mono text-ink">{Math.round(weight * 100)}%</span></li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// Fetches an owner-only recording on demand and plays it inline.
+function Recording({ interviewId, index, kind }) {
+  const [url, setUrl] = useState('');
+  const [state, setState] = useState('idle');
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  if (url) {
+    return kind === 'video'
+      ? <video controls autoPlay src={url} className="fade-in mt-3 max-h-64 w-full rounded-control bg-ink" />
+      : <audio controls autoPlay src={url} className="fade-in mt-3 w-full" />;
+  }
+  return (
+    <button
+      type="button"
+      className="ghost-btn mt-2 !px-2 !py-1 text-xs"
+      disabled={state === 'loading'}
+      onClick={async () => {
+        setState('loading');
+        try {
+          setUrl(await api.getAnswerMediaUrl(interviewId, index, kind));
+        } catch {
+          setState('error');
+        }
+      }}
+    >
+      {state === 'loading' ? <Spinner className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+      {state === 'error' ? 'Recording unavailable' : kind === 'video' ? 'Play recording' : 'Play audio'}
+    </button>
+  );
+}
+
+const clock = (seconds) => {
+  const safe = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, '0')}`;
+};
+
+// The whole interview as one player, with a jump list per answer. Parts
+// (one per page load) are fetched on demand with the owner's token.
+function InterviewRecording({ interviewId, parts, turns, playerRef }) {
+  const videoRef = useRef(null);
+  const urlsRef = useRef({});
+  const stopAtRef = useRef(null);
+  const [part, setPart] = useState(null);
+  const [state, setState] = useState('idle'); // idle | loading | ready | error
+
+  useEffect(() => () => Object.values(urlsRef.current).forEach((url) => URL.revokeObjectURL(url)), []);
+
+  const play = useCallback(async (targetPart, start = 0, end = null) => {
+    try {
+      setState('loading');
+      if (!urlsRef.current[targetPart]) {
+        urlsRef.current[targetPart] = await api.getRecordingUrl(interviewId, targetPart);
+      }
+      const video = videoRef.current;
+      if (!video) return;
+      if (part !== targetPart || !video.src) {
+        video.src = urlsRef.current[targetPart];
+        await new Promise((resolve) => {
+          if (video.readyState >= 1) resolve();
+          else video.addEventListener('loadedmetadata', resolve, { once: true });
+        });
+      }
+      setPart(targetPart);
+      stopAtRef.current = end;
+      video.currentTime = start;
+      setState('ready');
+      await video.play?.()?.catch?.(() => {});
+    } catch {
+      setState('error');
+    }
+  }, [interviewId, part]);
+
+  // Let each journey turn jump here.
+  useEffect(() => {
+    if (playerRef) playerRef.current = { play };
+  }, [playerRef, play]);
+
+  const onTimeUpdate = () => {
+    const video = videoRef.current;
+    if (video && stopAtRef.current !== null && video.currentTime >= stopAtRef.current) {
+      video.pause();
+      stopAtRef.current = null;
+    }
+  };
+
+  const chapters = turns.filter((turn) => turn.recording);
+  return (
+    <Panel i={3} className="overflow-hidden">
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_280px]">
+        <div className="relative aspect-video bg-ink">
+          <video ref={videoRef} controls playsInline onTimeUpdate={onTimeUpdate} className="h-full w-full" />
+          {state !== 'ready' && (
+            <div className="absolute inset-0 grid place-items-center text-center text-paper/70">
+              {state === 'loading' ? <Spinner className="h-6 w-6" /> : (
+                <button type="button" className="btn bg-paper text-ink hover:bg-white" onClick={() => play(parts[0])}>
+                  <Play className="h-4 w-4" /> {state === 'error' ? 'Recording unavailable — retry' : 'Play interview recording'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="p-5">
+          <SectionTitle title="Interview recording" description="Jump to any answer." />
+          <ol className="mt-3 divide-y divide-line">
+            {chapters.map((turn) => (
+              <li key={turn.index}>
+                <button
+                  type="button"
+                  onClick={() => play(turn.recording.part, turn.recording.start, turn.recording.end)}
+                  className="flex w-full items-center justify-between gap-3 py-2.5 text-left text-[13px] text-ink-2 transition hover:text-ink"
+                >
+                  <span className="min-w-0 truncate">Question {turn.index}{turn.topic ? ` · ${turn.topic}` : ''}</span>
+                  <span className="num shrink-0 font-mono text-xs text-ink-3">{clock(turn.recording.start)}</span>
+                </button>
+              </li>
+            ))}
+            {parts.length > 1 && <li className="pt-2.5 text-xs text-ink-3">Recorded in {parts.length} parts (the page was reloaded).</li>}
+          </ol>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function TurnDetails({ turn, interviewId, playerRef }) {
+  const criteria = turn.evaluation?.criteria_scores;
+  const criteriaRows = CRITERIA.filter(([key]) => present(criteria?.[key]));
+  const speech = turn.speech_metrics;
+  const vision = turn.vision_metrics;
+  return (
+    <>
+      {criteriaRows.length > 0 && (
+        <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-3">
+          {criteriaRows.map(([key, label]) => (
+            <span key={key}>{label} <span className="num font-mono text-ink">{criteria[key]}</span></span>
+          ))}
+        </p>
+      )}
+      {(speech || turn.transcript_source) && (
+        <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-3">
+          <span className="inline-flex items-center gap-1"><Mic className="h-3 w-3" /> Spoken answer</span>
+          {present(speech?.words_per_minute) && <span>{speech.words_per_minute} wpm</span>}
+          {present(speech?.filler_count) && <span>{speech.filler_count} fillers</span>}
+          {present(speech?.long_pauses) && <span>{speech.long_pauses} long pauses</span>}
+        </p>
+      )}
+      {vision && present(vision.eyeContact) && (
+        <p className="mt-1 text-xs text-ink-3">
+          Screen gaze {vision.eyeContact}%
+          {present(vision.facePresence) && ` · face visible ${vision.facePresence}%`}
+          {vision.multipleFaceEvents ? ` · another face appeared ${vision.multipleFaceEvents}×` : ''}
+        </p>
+      )}
+      {turn.answer && (
+        <details className="group mt-3">
+          <summary className="cursor-pointer list-none text-xs text-ink-2 transition hover:text-ink">
+            <span className="group-open:hidden">Show your answer</span>
+            <span className="hidden group-open:inline">Hide your answer</span>
+          </summary>
+          <p className="mt-2 whitespace-pre-line rounded-control border border-line bg-paper p-3 text-[13px] leading-relaxed text-ink-2">{turn.answer}</p>
+        </details>
+      )}
+      {turn.transcript_source && present(criteria?.relevance) && criteria.relevance < 35 && (
+        <p className="mt-2 text-xs text-warn">This answer looked unrelated to the question; background speech may have been picked up.</p>
+      )}
+      {turn.recording && playerRef ? (
+        <button
+          type="button"
+          className="ghost-btn mt-2 !px-2 !py-1 text-xs"
+          onClick={() => playerRef.current?.play(turn.recording.part, turn.recording.start, turn.recording.end)}
+        >
+          <Play className="h-3.5 w-3.5" /> Play this answer
+        </button>
+      ) : interviewId && (turn.has_video || turn.has_audio) && (
+        <Recording interviewId={interviewId} index={turn.index} kind={turn.has_video ? 'video' : 'audio'} />
+      )}
+    </>
+  );
+}
+
+function AdaptiveJourney({ turns, interviewId, playerRef }) {
   return (
     <Panel i={3} className="p-6 sm:p-8">
       <SectionTitle
@@ -123,7 +383,8 @@ function AdaptiveJourney({ turns }) {
             {turn.evaluation?.answer_quality_score != null && (
               <p className="num mt-3 font-mono text-[13px] text-ink">Technical score: {turn.evaluation.answer_quality_score}/100</p>
             )}
-            {turn.evaluation?.feedback && <p className="mt-2 text-sm leading-relaxed text-ink-2">{turn.evaluation.feedback}</p>}
+            <TurnDetails turn={turn} interviewId={interviewId} playerRef={playerRef} />
+            {turn.evaluation?.feedback && <p className="mt-3 text-sm leading-relaxed text-ink-2">{turn.evaluation.feedback}</p>}
             {turn.evaluation?.evaluation_source === 'fallback' && (
               <p className="mt-2 text-xs text-warn">Approximate score: the AI evaluator was unavailable for this answer.</p>
             )}
@@ -174,6 +435,7 @@ export default function Report() {
 
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
+  const playerRef = useRef(null);
   const [error, setError] = useState('');
 
   // Show the cached report instantly, then replace it with the saved one.
@@ -213,8 +475,11 @@ export default function Report() {
     );
   }
 
-  // Prefer this browser's richer local journey; otherwise use the server's.
-  const journey = localJourney.length ? localJourney : (Array.isArray(report.turns) ? report.turns : []);
+  // The server's turns carry transcripts, criteria and delivery metrics;
+  // this browser's local copy is only used until they are available.
+  const serverTurns = Array.isArray(report.turns) ? report.turns : [];
+  const recordingParts = Array.isArray(report.recording_parts) ? report.recording_parts : [];
+  const journey = serverTurns.length ? serverTurns : localJourney;
   const scores = scoreList(report);
   const strengths = Array.isArray(report.strengths) ? report.strengths : [];
   const improvements = Array.isArray(report.improvements) ? report.improvements : [];
@@ -228,7 +493,7 @@ export default function Report() {
       <PageHeader
         kicker="Saved evaluation report"
         title="Interview Performance Report"
-        description={`Saved answer evaluation and observable camera-engagement signals for ${targetRole}.`}
+        description={`Saved answer evaluation and observable camera-engagement signals for ${targetRole}${report.answer_mode === 'voice' ? ' · spoken interview' : ''}.`}
         actions={(
           <button onClick={() => navigate('/dashboard')} className="secondary-btn">
             <ArrowLeft className="h-4 w-4" /> Back to Dashboard
@@ -245,7 +510,8 @@ export default function Report() {
           <div className="mt-6 space-y-5">
             {scores.map((score, index) => <ProgressBar key={score.label} {...score} i={index} />)}
           </div>
-          <p className="mt-7 text-xs leading-relaxed text-ink-3">
+          <ScoreMethod scoring={report.scoring} />
+          <p className="mt-5 text-xs leading-relaxed text-ink-3">
             Scores summarise this practice session; they are not hiring decisions. Camera engagement is an observable
             approximation, and when the camera model was unavailable it is left out and the other parts are re-weighted.
           </p>
@@ -257,7 +523,24 @@ export default function Report() {
         <blockquote className="mt-3 font-serif text-[1.4rem] leading-snug text-ink">“{summary}”</blockquote>
       </Panel>
 
-      {journey.length > 0 && <AdaptiveJourney turns={journey} />}
+      {(report.criteria_scores || report.speech_metrics || report.vision_metrics?.answers_with_camera) && (
+        <section className="grid gap-5 lg:grid-cols-2">
+          <CriteriaPanel criteria={report.criteria_scores} i={3} />
+          <DeliveryPanel speech={report.speech_metrics} vision={report.vision_metrics} i={3} />
+        </section>
+      )}
+
+      {recordingParts.length > 0 && (
+        <InterviewRecording interviewId={report.interview_id || interviewId} parts={recordingParts} turns={journey} playerRef={playerRef} />
+      )}
+
+      {journey.length > 0 && (
+        <AdaptiveJourney
+          turns={journey}
+          interviewId={report.interview_id || interviewId}
+          playerRef={recordingParts.length > 0 ? playerRef : null}
+        />
+      )}
 
       <section className="grid gap-5 lg:grid-cols-2">
         <FeedbackList title="Key Strengths" items={strengths} positive i={4} />

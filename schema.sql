@@ -198,7 +198,55 @@ CREATE TABLE IF NOT EXISTS arena_turns (
     game_result JSONB NOT NULL CHECK (jsonb_typeof(game_result) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- 8. Indexes for the hot lookups
+-- 8. Speech-to-text, multi-criteria grading and per-answer vision
+-- A transcript is produced before the answer is submitted (the candidate
+-- reviews and may edit it), so it lives in its own table keyed by turn.
+-- Re-recording an answer replaces the row.
+CREATE TABLE IF NOT EXISTS answer_transcripts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    question_index INT NOT NULL CHECK (question_index >= 1),
+    transcript TEXT NOT NULL,
+    words JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(words) = 'array'),
+    speech_metrics JSONB,
+    source VARCHAR(20) NOT NULL,
+    model VARCHAR(60),
+    language VARCHAR(12),
+    duration_seconds FLOAT,
+    audio_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (interview_id, question_index)
+);
+
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS transcript TEXT,
+    ADD COLUMN IF NOT EXISTS transcript_source VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS speech_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS criteria_scores JSONB,
+    ADD COLUMN IF NOT EXISTS vision_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS audio_path TEXT;
+
+-- Scoring v2: every report records the formula version and the weights
+-- actually applied, so older reports remain explainable.
+ALTER TABLE evaluation_reports
+    ADD COLUMN IF NOT EXISTS criteria_scores JSONB,
+    ADD COLUMN IF NOT EXISTS speech_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS scoring_version INT,
+    ADD COLUMN IF NOT EXISTS scoring_weights JSONB;
+
+-- 8b. Voice interviews: the whole interview is recorded in one or more
+-- parts (a new part starts after a reload); each answer stores where it
+-- sits in that recording. answer_mode records how answers were given.
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS answer_mode VARCHAR(10) NOT NULL DEFAULT 'typed'
+        CHECK (answer_mode IN ('voice', 'typed'));
+
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS recording_part INT CHECK (recording_part >= 1),
+    ADD COLUMN IF NOT EXISTS answer_start_seconds FLOAT CHECK (answer_start_seconds >= 0),
+    ADD COLUMN IF NOT EXISTS answer_end_seconds FLOAT CHECK (answer_end_seconds >= 0);
+
+-- 9. Indexes for the hot lookups
 CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);
 CREATE INDEX IF NOT EXISTS question_rubrics_lookup_idx ON question_rubrics(interview_id, question_index);
 CREATE INDEX IF NOT EXISTS interviews_user_created_idx ON interviews(user_id, created_at DESC);

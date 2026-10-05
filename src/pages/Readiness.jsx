@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
+  AudioLines,
   Camera,
-  Lightbulb,
+  Keyboard,
   Mic,
   RefreshCw,
+  Volume2,
   Wifi,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
 import { Badge, FlowSteps, Notice, PageHeader, Panel, SectionTitle } from '../components/ui';
-import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
+import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
+import { speak } from '../services/speech';
+import { createVoiceMonitor } from '../services/voiceActivity';
 
 // The backend stores role titles in a VARCHAR(100) column.
 const ROLE_TITLE_MAX = 100;
@@ -60,6 +64,12 @@ export default function Readiness() {
   const [consent, setConsent] = useState(false);
   const [checking, setChecking] = useState(true);
   const [permissionError, setPermissionError] = useState('');
+  // Spoken (default) or typed answers; the room/speaker checks below.
+  const [answerMode, setAnswerMode] = useState(() => readAnswerMode());
+  const [micLevel, setMicLevel] = useState(0);
+  const [roomNoise, setRoomNoise] = useState('measuring'); // measuring | quiet | noisy
+  const [speakerState, setSpeakerState] = useState('idle'); // idle | playing | done
+  const monitorRef = useRef(null);
 
   // -------------------------------------------------------------
   // BLOCK 3: Target Role & Job Description Configuration State
@@ -77,6 +87,8 @@ export default function Readiness() {
   // -------------------------------------------------------------
   // Stops any running camera tracks cleanly.
   const stopStream = () => {
+    monitorRef.current?.stop();
+    monitorRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   };
@@ -108,7 +120,9 @@ export default function Readiness() {
     }
 
     try {
-      const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       const audioTracks = microphoneStream.getAudioTracks();
       tracks.push(...audioTracks);
       setMicrophoneReady(audioTracks.length > 0);
@@ -124,6 +138,32 @@ export default function Readiness() {
 
     if (errors.length > 0) setPermissionError(errors.join(' · '));
     setChecking(false);
+
+    // Live microphone meter and a 3-second background-noise check.
+    setRoomNoise('measuring');
+    if (streamRef.current?.getAudioTracks().length) {
+      monitorRef.current = createVoiceMonitor(streamRef.current);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const snapshot = monitorRef.current?.snapshot();
+      if (!snapshot) return;
+      setMicLevel(snapshot.level);
+      if (snapshot.elapsedMs > 3000) {
+        setRoomNoise((current) => (current === 'measuring'
+          ? (snapshot.noiseFloor > 0.03 ? 'noisy' : 'quiet') : current));
+      }
+    }, 150);
+    return () => clearInterval(timer);
+  }, []);
+
+  const testSpeakers = async () => {
+    setSpeakerState('playing');
+    await speak({ phrase: 'speaker_test' },
+      'This is a speaker test. If you can hear this clearly, your audio is ready for the interview.');
+    setSpeakerState('done');
   };
 
   useEffect(() => {
@@ -144,7 +184,8 @@ export default function Readiness() {
   // BLOCK 5: Navigation & Target Specification Persistence
   // -------------------------------------------------------------
   // Validates device checks and stores customized Role & JD to localStorage.
-  const canContinue = cameraReady && microphoneReady && networkReady && consent;
+  const voiceMode = answerMode === 'voice';
+  const canContinue = cameraReady && (microphoneReady || !voiceMode) && networkReady && consent;
 
   const handleContinue = () => {
     if (!canContinue) return;
@@ -153,6 +194,7 @@ export default function Readiness() {
     // Persist target role and custom job description for Interview.jsx
     localStorage.setItem(STORAGE_KEYS.roleTitle, roleTitle.trim() || 'Software Engineer');
     localStorage.setItem(STORAGE_KEYS.jobDescription, jobDescription.trim());
+    localStorage.setItem(STORAGE_KEYS.answerMode, answerMode);
 
     // Reset previous interview progress so fresh questions generate
     clearInterviewProgress();
@@ -172,9 +214,9 @@ export default function Readiness() {
   // -------------------------------------------------------------
   const checks = [
     { icon: Camera, label: 'Camera', status: cameraReady ? 'Ready' : 'Permission Required', ready: cameraReady, helper: 'Video input for engagement tracking' },
-    { icon: Mic, label: 'Microphone', status: microphoneReady ? 'Ready' : 'Permission Required', ready: microphoneReady, helper: 'Audio input for spoken answers' },
+    { icon: Mic, label: 'Microphone', status: microphoneReady ? 'Ready' : 'Permission Required', ready: microphoneReady, helper: 'Speak to see the level move' },
+    { icon: AudioLines, label: 'Room noise', status: { measuring: 'Measuring…', quiet: 'Quiet', noisy: 'Noisy' }[roomNoise], ready: roomNoise === 'quiet', helper: roomNoise === 'noisy' ? 'Background speech may be transcribed' : 'Background sound level' },
     { icon: Wifi, label: 'Network', status: networkReady ? 'Connected' : 'Offline', ready: networkReady, helper: 'Browser network connection' },
-    { icon: Lightbulb, label: 'Environment', status: cameraReady ? 'Good' : 'Waiting', ready: cameraReady, helper: 'Even light on your face' },
   ];
   const readyCount = checks.filter((check) => check.ready).length;
 
@@ -280,12 +322,37 @@ export default function Readiness() {
               <div className="mt-1 divide-y divide-line">
                 {checks.map((check) => <DeviceCheck key={check.label} {...check} />)}
               </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-sunken" aria-label="Microphone level">
+                <div className="h-full rounded-full bg-ink transition-[width] duration-150" style={{ width: `${Math.round(micLevel * 100)}%` }} />
+              </div>
+              <button type="button" onClick={testSpeakers} disabled={speakerState === 'playing'} className="secondary-btn mt-4 w-full !py-2 text-[13px]">
+                <Volume2 className="h-4 w-4" />
+                {speakerState === 'playing' ? 'Playing test sound…' : speakerState === 'done' ? 'Play speaker test again' : 'Test speakers'}
+              </button>
+              <p className="mt-2 pb-2 text-center text-xs text-ink-3">Questions are read aloud through your current speakers or headphones.</p>
             </div>
             {permissionError && <div className="px-5 pb-4"><Notice tone="warn">{permissionError}</Notice></div>}
           </Panel>
 
           <Panel i={3} className="p-5">
-            <label className="flex cursor-pointer items-start gap-3">
+            <fieldset>
+              <legend className="text-[15px] font-semibold text-ink">How will you answer?</legend>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {[['voice', 'Speak', 'Recommended', Mic], ['typed', 'Type', 'No microphone', Keyboard]].map(([value, label, hint, Icon]) => (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer flex-col gap-1 rounded-control border px-3 py-2.5 transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ink ${
+                      answerMode === value ? 'border-ink bg-ink text-paper' : 'border-line hover:border-ink-4'
+                    }`}
+                  >
+                    <input type="radio" name="answer-mode" value={value} checked={answerMode === value} onChange={() => setAnswerMode(value)} className="sr-only" />
+                    <span className="flex items-center gap-2 text-sm font-medium"><Icon className="h-4 w-4" aria-hidden="true" />{label}</span>
+                    <span className={`text-xs ${answerMode === value ? 'text-paper/60' : 'text-ink-3'}`}>{hint}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <label className="mt-5 flex cursor-pointer items-start gap-3">
               <input
                 type="checkbox"
                 checked={consent}
@@ -293,7 +360,7 @@ export default function Readiness() {
                 className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
               />
               <span className="text-[13px] leading-relaxed text-ink-2">
-                I consent to audio, video, and observable camera-engagement analysis for this practice interview.
+                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed for observable camera engagement.
               </span>
             </label>
             <button onClick={handleContinue} disabled={!canContinue} className="primary-btn mt-5 w-full !py-3">
@@ -301,7 +368,7 @@ export default function Readiness() {
             </button>
             {!canContinue && (
               <p className="mt-3 text-center text-xs text-ink-3">
-                Camera, microphone, network and consent are required to start.
+                {voiceMode ? 'Camera, microphone, network and consent are required to start.' : 'Camera, network and consent are required to start.'}
               </p>
             )}
           </Panel>

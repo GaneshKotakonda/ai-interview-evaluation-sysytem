@@ -27,6 +27,8 @@ EVALUATION_FIELDS = (
     "answer_quality_score", "communication_score", "strengths", "improvements",
     "feedback", "missing_concepts", "evaluation_source",
 )
+# Added later (scoring v2); older rows may not have them.
+OPTIONAL_EVALUATION_FIELDS = ("criteria_scores",)
 
 
 # -------------------------------------------------------------
@@ -34,7 +36,10 @@ EVALUATION_FIELDS = (
 # -------------------------------------------------------------
 def public_evaluation(response):
     """Return only the candidate-visible evaluation fields of a response row."""
-    return {key: response[key] for key in EVALUATION_FIELDS}
+    result = {key: response[key] for key in EVALUATION_FIELDS}
+    for key in OPTIONAL_EVALUATION_FIELDS:
+        result[key] = response.get(key)
+    return result
 
 
 def public_question(question):
@@ -99,11 +104,9 @@ def store_question(cur, interview_id, turn, content):
          json.dumps(content["rubric_points"]), content.get("boss_round", False)),
     )
     question = cur.fetchone()
-    for rubric in content["rubric_points"]:
-        try:
-            embedding = gemini_service.get_embedding(rubric)
-        except Exception:
-            embedding = []
+    # One batched embedding request for all rubric points (see get_embeddings).
+    embeddings = gemini_service.get_embeddings(content["rubric_points"])
+    for rubric, embedding in zip(content["rubric_points"], embeddings):
         cur.execute(
             """INSERT INTO question_rubrics
                (interview_id, question_index, question_text, ideal_concept_chunk, embedding)
@@ -147,11 +150,24 @@ def submission_result(response):
     }
 
 
-def evaluate_and_store(conn, cur, interview, question, answer, video_url):
+def transcript_for_turn(cur, interview_id, question_index):
+    """Return the saved speech-to-text row for one turn, if any."""
+    cur.execute(
+        "SELECT * FROM answer_transcripts WHERE interview_id = %s AND question_index = %s;",
+        (str(interview_id), question_index),
+    )
+    return cur.fetchone()
+
+
+def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision_metrics=None,
+                       recording=None):
     """Embed, retrieve rubric matches, grade with Gemini and persist one answer.
 
     Pipeline: answer embedding → cosine search over this question's rubric
     vectors → filler count → Gemini grading (with fallback) → INSERT.
+    When the answer was spoken, the transcript and its delivery metrics
+    (computed at transcription time from the audio) are stored with it;
+    ``answer`` is the text the candidate submitted, possibly edited.
     """
     # Step A: Embed the answer (empty or failed embeddings skip retrieval).
     try:
@@ -175,15 +191,23 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url):
         interview["job_description"],
     )
 
-    # Step D: Persist the answer with a copy of the question metadata.
+    # Step D: Speech-to-text output for this turn, if the answer was spoken.
+    spoken = transcript_for_turn(cur, interview["id"], question["question_index"]) or {}
+    speech_metrics = spoken.get("speech_metrics")
+    criteria = evaluation.get("criteria_scores")
+
+    # Step E: Persist the answer with a copy of the question metadata.
     cur.execute(
         """INSERT INTO interview_responses (
            interview_id, question_id, question_index, question_text, candidate_answer,
            answer_embedding, semantic_similarity_score, video_url, difficulty,
            is_follow_up, topic, adaptive_reason, answer_quality_score, communication_score,
            feedback, strengths, improvements, missing_concepts, filler_metrics,
-           evaluation_source, evaluated_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+           evaluation_source, evaluated_at,
+           criteria_scores, transcript, transcript_source, speech_metrics, vision_metrics, audio_path,
+           recording_part, answer_start_seconds, answer_end_seconds)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),
+                   %s,%s,%s,%s,%s,%s,%s,%s,%s)
            RETURNING *;""",
         (str(interview["id"]), str(question["id"]), question["question_index"],
          question["question_text"], answer, vector or None, similarity, video_url,
@@ -192,7 +216,13 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url):
          evaluation["communication_score"], evaluation["feedback"],
          json.dumps(evaluation["strengths"]), json.dumps(evaluation["improvements"]),
          json.dumps(evaluation["missing_concepts"]), json.dumps(fillers),
-         evaluation["evaluation_source"]),
+         evaluation["evaluation_source"],
+         json.dumps(criteria) if criteria else None,
+         spoken.get("transcript"), spoken.get("source"),
+         json.dumps(speech_metrics) if speech_metrics else None,
+         json.dumps(vision_metrics) if vision_metrics else None,
+         spoken.get("audio_path"),
+         (recording or {}).get("part"), (recording or {}).get("start"), (recording or {}).get("end")),
     )
     return cur.fetchone()
 
@@ -314,7 +344,10 @@ def report_turns(cur, interview_id):
     """
     cur.execute(
         """SELECT r.question_index, r.question_text, r.difficulty, r.is_follow_up, r.topic,
-                  r.answer_quality_score, r.feedback, r.evaluation_source, r.next_result
+                  r.answer_quality_score, r.communication_score, r.feedback, r.evaluation_source,
+                  r.next_result, r.criteria_scores, r.candidate_answer, r.transcript,
+                  r.transcript_source, r.speech_metrics, r.vision_metrics, r.video_url, r.audio_path,
+                  r.recording_part, r.answer_start_seconds, r.answer_end_seconds
            FROM interview_responses r
            WHERE r.interview_id = %s
            ORDER BY r.question_index;""",
@@ -329,11 +362,21 @@ def report_turns(cur, interview_id):
             "difficulty": row["difficulty"],
             "is_follow_up": bool(row["is_follow_up"]),
             "topic": row["topic"],
+            "answer": row.get("candidate_answer"),
+            "transcript_source": row.get("transcript_source"),
             "evaluation": {
                 "answer_quality_score": row["answer_quality_score"],
+                "communication_score": row.get("communication_score"),
+                "criteria_scores": row.get("criteria_scores"),
                 "feedback": row["feedback"],
                 "evaluation_source": row["evaluation_source"],
             },
+            "speech_metrics": row.get("speech_metrics"),
+            "vision_metrics": row.get("vision_metrics"),
+            "has_video": bool(row.get("video_url")),
+            "has_audio": bool(row.get("audio_path")),
+            "recording": ({"part": row["recording_part"], "start": row.get("answer_start_seconds"),
+                           "end": row.get("answer_end_seconds")} if row.get("recording_part") else None),
             "adaptation": cached.get("adaptation") if isinstance(cached, dict) else None,
         })
     return turns

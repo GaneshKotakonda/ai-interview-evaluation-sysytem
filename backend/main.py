@@ -9,6 +9,11 @@ the signed-in user; /users/{firebase_uid} paths must name that user.
 
 Endpoints (all under /api):
     POST /interviews/start                  create a session + first question
+    POST /interviews/{id}/transcribe        speech-to-text for a recorded answer
+    POST /interviews/{id}/recording         whole-interview recording chunk
+    GET  /interviews/{id}/recording/{part}  owner-only interview recording
+    GET  /interviews/{id}/speech/{item}     spoken intro/outro/question (Piper)
+    GET  /speech/{phrase}                   fixed spoken phrases (Piper)
     POST /interviews/{id}/submit-answer     save, embed and grade one answer
     POST /interviews/{id}/next-question     apply policy, issue the next turn
     POST /interviews/{id}/hint              Arena only: spend the one hint
@@ -17,6 +22,8 @@ Endpoints (all under /api):
     GET  /interviews/{id}/arena-results     saved Arena summary
     GET  /interviews/user/{firebase_uid}    a user's interview history
     DELETE /interviews/{id}                 owner deletes one interview
+    GET  /interviews/{id}/media/{n}         owner-only answer recording
+    GET  /interviews/{id}/state             resume an active interview
     GET  /users/{firebase_uid}/profile      profile + practice statistics
     PUT  /users/{firebase_uid}/profile      create/update name and email
     GET  /users/{firebase_uid}/reports      saved Standard reports + scores
@@ -25,13 +32,16 @@ Endpoints (all under /api):
 import json
 import logging
 import os
+import re
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import config  # loads backend/.env before the modules below read settings
@@ -42,6 +52,9 @@ from auth import AuthUser
 import database
 import gemini_service
 import scoring
+import speech_analysis
+import stt_service
+import tts_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("interview-api")
@@ -52,9 +65,15 @@ logger = logging.getLogger("interview-api")
 # -------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Check PostgreSQL once at startup; the API still starts if it is down."""
+    """Check PostgreSQL once at startup; the API still starts if it is down.
+
+    The speech-to-text model and the text-to-speech voice are loaded in
+    background threads so the first request does not pay the loading cost.
+    """
     logger.info("Server starting; checking PostgreSQL connection")
     database.test_db_connection()
+    threading.Thread(target=stt_service.warm_up, daemon=True).start()
+    threading.Thread(target=tts_service.warm_up, daemon=True).start()
     yield
 
 
@@ -89,30 +108,48 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
-def save_answer_video(interview_id: str, question_index: int, video: UploadFile) -> str:
-    """Stream an uploaded answer video to disk and return its storage path.
+# Browsers record WebM (Chrome, Firefox, Edge) or MP4 (Safari).
+MEDIA_EXTENSIONS = {"webm": "webm", "mp4": "mp4", "ogg": "ogg", "mpeg": "mp3", "wav": "wav", "x-wav": "wav"}
+
+
+def media_filename(question_index: int, kind: str, content_type: Optional[str] = None) -> str:
+    """``q_<n>.webm`` for video, ``q_<n>_audio.<ext>`` for audio."""
+    subtype = ((content_type or "").split(";")[0].split("/")[-1] or "webm").lower()
+    extension = MEDIA_EXTENSIONS.get(subtype, "webm")
+    return f"q_{question_index}.{extension}" if kind == "video" else f"q_{question_index}_audio.{extension}"
+
+
+def save_upload(interview_id: str, filename: str, upload: UploadFile) -> str:
+    """Stream an upload to backend/uploads/<id>/<filename>; return the absolute path.
 
     Rejects files larger than MAX_UPLOAD_MB with HTTP 413 and removes the
-    partial file. The canonical UUID is used for both the folder and the URL
-    so they always match, whatever case the client sent.
+    partial file. The canonical UUID is used for the folder whatever case
+    the client sent.
     """
     canonical_id = str(uuid.UUID(interview_id))
     folder = os.path.join(UPLOAD_DIR, canonical_id)
     os.makedirs(folder, exist_ok=True)
-    filename = f"q_{question_index}.webm"
     path = os.path.join(folder, filename)
 
     limit = config.MAX_UPLOAD_MB * 1024 * 1024
     written = 0
     with open(path, "wb") as buffer:
-        while chunk := video.file.read(UPLOAD_CHUNK_BYTES):
+        while chunk := upload.file.read(UPLOAD_CHUNK_BYTES):
             written += len(chunk)
             if written > limit:
                 break
             buffer.write(chunk)
     if written > limit:
         os.remove(path)
-        raise HTTPException(413, f"Answer video exceeds the {config.MAX_UPLOAD_MB} MB limit.")
+        raise HTTPException(413, f"Recording exceeds the {config.MAX_UPLOAD_MB} MB limit.")
+    return path
+
+
+def save_answer_video(interview_id: str, question_index: int, video: UploadFile) -> str:
+    """Save an answer video and return its storage path (relative to uploads)."""
+    canonical_id = str(uuid.UUID(interview_id))
+    filename = media_filename(question_index, "video", video.content_type)
+    save_upload(interview_id, filename, video)
     return f"/uploads/{canonical_id}/{filename}"
 
 
@@ -182,6 +219,8 @@ class StartInterviewRequest(BaseModel):
     role_title: str = Field(default="Software Engineer", max_length=100)
     job_description: Optional[str] = None
     interview_mode: Literal["standard", "game"] = "standard"
+    # How answers are given: "voice" (spoken, transcribed) or "typed".
+    answer_mode: Literal["voice", "typed"] = "typed"
     max_turns: int = Field(default=5, ge=1, le=20)
 
 
@@ -232,6 +271,14 @@ def completion_response(report):
         "camera_engagement_score": report["camera_engagement_score"],
         "strengths": report["strengths"], "improvements": report["improvements"],
         "feedback": report["summary_feedback"], "nlp_metrics": report["nlp_metrics"],
+        # Scoring v2 detail; absent (None) on reports saved before v2.
+        "criteria_scores": report.get("criteria_scores"),
+        "speech_metrics": report.get("speech_metrics"),
+        "vision_metrics": report.get("vision_metrics"),
+        "scoring": {
+            "version": report.get("scoring_version") or 1,
+            "weights": report.get("scoring_weights"),
+        },
     }
 
 
@@ -284,11 +331,13 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         # Step B: Create the interview session.
         cur.execute(
             """
-            INSERT INTO interviews (user_id, role_title, job_description, status, max_turns, interview_mode)
-            VALUES (%s, %s, %s, 'in_progress', %s, %s)
+            INSERT INTO interviews (user_id, role_title, job_description, status, max_turns,
+                                    answer_mode, interview_mode)
+            VALUES (%s, %s, %s, 'in_progress', %s, %s, %s)
             RETURNING id;
             """,
-            (user_id, role_title, payload.job_description, max_turns, payload.interview_mode)
+            (user_id, role_title, payload.job_description, max_turns,
+             "typed" if payload.interview_mode == "game" else payload.answer_mode, payload.interview_mode)
         )
         interview_id = str(cur.fetchone()["id"])
 
@@ -310,6 +359,7 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         "role_title": role_title,
         "job_description": payload.job_description,
         "interview_mode": payload.interview_mode,
+        "answer_mode": "typed" if payload.interview_mode == "game" else payload.answer_mode,
         "current_turn": 1, "current_difficulty": "medium",
         "max_turns": max_turns, "question": question,
         # Shape compatibility only: one turn, never a pre-generated set.
@@ -321,10 +371,31 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
 # BLOCK 7: POST /api/interviews/{id}/submit-answer
 # -------------------------------------------------------------
 # Multipart form: question_index, question_text (ignored for grading),
-# candidate_answer and an optional .webm video.
+# candidate_answer, an optional video and optional vision_metrics (JSON of
+# this answer's camera-engagement snapshot from the browser).
 # 1. Lock the interview. A retry of an already accepted answer returns the
 #    stored result; a *different* answer for that question is a 409.
-# 2. Save the video, then embed → retrieve rubric → grade → persist.
+# 2. Save the video, then embed → retrieve rubric → grade → persist. A
+#    transcript saved by /transcribe for this turn is attached automatically.
+def _parse_vision(raw: Optional[str]) -> Optional[dict]:
+    if not raw:
+        return None
+    try:
+        return scoring.sanitize_vision(json.loads(raw))
+    except (ValueError, TypeError):
+        return None
+
+
+def _recording_position(part, start, end) -> Optional[dict]:
+    """Where an answer sits in the session recording; None when invalid."""
+    numbers = (int, float)
+    if not (isinstance(part, int) and isinstance(start, numbers) and isinstance(end, numbers)):
+        return None
+    if not (1 <= part <= 50 and 0 <= start <= end <= 24 * 60 * 60):
+        return None
+    return {"part": part, "start": round(start, 2), "end": round(end, 2)}
+
+
 @app.post("/api/interviews/{interview_id}/submit-answer")
 def submit_answer(
     interview_id: str,
@@ -332,8 +403,13 @@ def submit_answer(
     question_text: str = Form(""),
     candidate_answer: str = Form(""),
     video: Optional[UploadFile] = File(None),
+    vision_metrics: Optional[str] = Form(None),
+    recording_part: Optional[int] = Form(None),
+    answer_start_seconds: Optional[float] = Form(None),
+    answer_end_seconds: Optional[float] = Form(None),
     user: AuthUser = Depends(auth.current_user),
 ):
+    recording = _recording_position(recording_part, answer_start_seconds, answer_end_seconds)
     with transaction("Could not save and evaluate this answer. Please retry.") as (conn, cur):
         interview = owned_interview(cur, interview_id, user)
         adaptive_service.require_active(interview)
@@ -360,8 +436,77 @@ def submit_answer(
             video_url = save_answer_video(interview_id, question_index, video)
         response = adaptive_service.evaluate_and_store(
             conn, cur, interview, question, candidate_answer, video_url,
+            vision_metrics=_parse_vision(vision_metrics), recording=recording,
         )
         return adaptive_service.submission_result(response)
+
+
+# -------------------------------------------------------------
+# BLOCK 7b: POST /api/interviews/{id}/transcribe  (speech-to-text)
+# -------------------------------------------------------------
+# Multipart form: question_index and an audio recording of the answer.
+# Returns the transcript for the candidate to review; it does NOT grade.
+# Three steps so no database lock is held while Whisper runs:
+#   1. short transaction: ownership, active session, current turn;
+#   2. save audio + transcribe + delivery metrics (no database);
+#   3. short transaction: upsert the transcript for this turn.
+# Re-recording replaces the previous transcript for the same turn.
+@app.post("/api/interviews/{interview_id}/transcribe")
+def transcribe_answer(
+    interview_id: str,
+    question_index: int = Form(...),
+    audio: UploadFile = File(...),
+    user: AuthUser = Depends(auth.current_user),
+):
+    content_type = (audio.content_type or "").lower()
+    if not content_type.startswith(("audio/", "video/")):
+        raise HTTPException(415, "Upload an audio recording.")
+
+    with transaction("Could not prepare transcription. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user, lock=False)
+        question = adaptive_service.question_for_submission(cur, interview, question_index)
+        cur.execute(
+            """SELECT 1 FROM interview_responses
+               WHERE interview_id = %s AND question_index = %s;""",
+            (interview_id, question_index),
+        )
+        if cur.fetchone():
+            raise HTTPException(409, "This question already has an accepted answer.")
+
+    filename = media_filename(question_index, "audio", content_type)
+    path = save_upload(interview_id, filename, audio)
+    try:
+        result = stt_service.transcribe(path, content_type, context=question["question_text"])
+    except stt_service.TranscriptionError as err:
+        raise HTTPException(422, str(err))
+    if not result["text"].strip():
+        raise HTTPException(422, "No speech was detected in the recording. Please try again.")
+    metrics = speech_analysis.compute_metrics(result["words"], result["text"])
+
+    with transaction("Could not save the transcript. Please retry.") as (_conn, cur):
+        cur.execute(
+            """INSERT INTO answer_transcripts
+               (interview_id, question_index, transcript, words, speech_metrics,
+                source, model, language, duration_seconds, audio_path)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (interview_id, question_index) DO UPDATE SET
+                 transcript = EXCLUDED.transcript, words = EXCLUDED.words,
+                 speech_metrics = EXCLUDED.speech_metrics, source = EXCLUDED.source,
+                 model = EXCLUDED.model, language = EXCLUDED.language,
+                 duration_seconds = EXCLUDED.duration_seconds,
+                 audio_path = EXCLUDED.audio_path, created_at = NOW();""",
+            (interview_id, question_index, result["text"], json.dumps(result["words"]),
+             json.dumps(metrics) if metrics else None, result["source"], result["model"],
+             result["language"], result["duration_seconds"], filename),
+        )
+
+    return {
+        "question_index": question_index,
+        "transcript": result["text"],
+        "source": result["source"],
+        "duration_seconds": result["duration_seconds"],
+        "speech_metrics": metrics,
+    }
 
 
 # -------------------------------------------------------------
@@ -479,33 +624,73 @@ def complete_and_evaluate_interview(
             )
         evaluations = batch_result.get("question_evaluations", [])
 
-        # Step C: Component scores and weighted overall score.
+        # Step C: Component scores and weighted overall score (scoring v2).
         neutral = scoring.NEUTRAL_SCORE
         answer_quality = scoring.average_score(
             int(ev.get("answer_quality_score", neutral)) for ev in evaluations)
         communication = scoring.average_score(
             int(ev.get("communication_score", neutral)) for ev in evaluations)
-        vision_metrics = payload.vision_metrics or {}
-        camera = scoring.camera_engagement(vision_metrics)
-        fluency = scoring.speech_fluency(filler_summary["total_fillers"], len(responses))
-        overall = scoring.overall_score(answer_quality, communication, camera, fluency)
+        criteria = scoring.average_criteria(ev.get("criteria_scores") for ev in evaluations)
 
-        # Step D: Top unique strengths/improvements and summary text.
-        strengths = list(batch_result.get("overall_strengths", []))
-        improvements = list(batch_result.get("overall_improvements", []))
+        # Speech: delivery measured from the audio when answers were spoken,
+        # otherwise the text-only filler estimate.
+        speech_summary = speech_analysis.summarize([r.get("speech_metrics") for r in responses])
+        if speech_summary and speech_summary.get("delivery_score") is not None:
+            fluency = speech_summary["delivery_score"]
+        else:
+            fluency = scoring.speech_fluency(filler_summary["total_fillers"], len(responses))
+
+        # Camera: mean of per-answer engagement; the browser's session
+        # snapshot is only used for sessions without per-answer data.
+        per_answer_vision = [r.get("vision_metrics") for r in responses]
+        vision_summary = scoring.summarize_vision(per_answer_vision)
+        per_answer_camera = [c for c in map(scoring.camera_engagement, per_answer_vision) if c is not None]
+        if per_answer_camera:
+            camera = round(sum(per_answer_camera) / len(per_answer_camera))
+            vision_metrics = vision_summary
+        else:
+            vision_metrics = payload.vision_metrics or {}
+            camera = scoring.camera_engagement(vision_metrics)
+
+        overall = scoring.overall_score(answer_quality, communication, camera, fluency)
+        weights = scoring.applied_weights(answer_quality, communication, camera, fluency)
+
+        # Step D: One holistic pass over the whole transcript (adaptive
+        # sessions; legacy batch grading already wrote a summary), then the
+        # top unique strengths/improvements and the summary text.
+        holistic = None
+        if adaptive_responses:
+            holistic = gemini_service.summarize_interview(
+                interview["role_title"], interview["job_description"],
+                [{"question": r["question_text"], "topic": r.get("topic"), "answer": r["candidate_answer"],
+                  "answer_quality_score": r.get("answer_quality_score"),
+                  "criteria_scores": r.get("criteria_scores")} for r in adaptive_responses],
+            )
+        if holistic:
+            batch_result = {**batch_result, "overall_summary": holistic["summary"],
+                            "overall_strengths": holistic["strengths"],
+                            "overall_improvements": holistic["improvements"]}
+        module_strengths, module_improvements = scoring.insights(criteria, speech_summary, vision_summary)
+        strengths = list(batch_result.get("overall_strengths", [])) + module_strengths
+        improvements = list(batch_result.get("overall_improvements", [])) + module_improvements
         for ev in evaluations:
             strengths.extend(ev.get("strengths") or [])
             improvements.extend(ev.get("improvements") or [])
-        top_strengths = list(dict.fromkeys(strengths))[:4]
-        top_improvements = list(dict.fromkeys(improvements))[:4]
+        top_strengths = list(dict.fromkeys(strengths))[:5]
+        top_improvements = list(dict.fromkeys(improvements))[:5]
         summary_feedback = (batch_result.get("overall_summary") or "").strip()
         if not summary_feedback:
             camera_text = (f"camera engagement reached {camera}%" if camera is not None
                            else "camera engagement was not measured")
+            if speech_summary and speech_summary.get("words_per_minute"):
+                speech_text = (f"You spoke at about {speech_summary['words_per_minute']} words per minute "
+                               f"with {speech_summary['fillers_per_minute']} filler words per minute.")
+            else:
+                speech_text = (f"Focus on reducing the {filler_summary['total_fillers']} filler words "
+                               "used across the session.")
             summary_feedback = (
                 f"Overall score: {overall}/100. "
-                f"Answer quality averaged {answer_quality}% and {camera_text}. "
-                f"Focus on reducing the {filler_summary['total_fillers']} filler words used across the session."
+                f"Answer quality averaged {answer_quality}% and {camera_text}. {speech_text}"
             )
 
         # Step E: Persist the report and close the interview.
@@ -514,8 +699,9 @@ def complete_and_evaluate_interview(
             INSERT INTO evaluation_reports (
                 interview_id, answer_quality_score, communication_score,
                 voice_confidence_score, speech_fluency_score, camera_engagement_score, overall_score,
-                vision_metrics, nlp_metrics, strengths, improvements, summary_feedback
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                vision_metrics, nlp_metrics, strengths, improvements, summary_feedback,
+                criteria_scores, speech_metrics, scoring_version, scoring_weights
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """,
             (
@@ -524,6 +710,9 @@ def complete_and_evaluate_interview(
                 fluency, camera, overall,
                 json.dumps(vision_metrics), json.dumps(filler_summary),
                 top_strengths, top_improvements, summary_feedback,
+                json.dumps(criteria) if criteria else None,
+                json.dumps(speech_summary) if speech_summary else None,
+                scoring.SCORING_VERSION, json.dumps(weights),
             )
         )
         cur.execute(
@@ -547,6 +736,9 @@ def complete_and_evaluate_interview(
         "camera_engagement_score": camera,
         "strengths": top_strengths, "improvements": top_improvements,
         "summary_feedback": summary_feedback, "nlp_metrics": filler_summary,
+        "criteria_scores": criteria, "speech_metrics": speech_summary,
+        "vision_metrics": vision_metrics, "scoring_version": scoring.SCORING_VERSION,
+        "scoring_weights": weights,
     })
 
 
@@ -572,6 +764,8 @@ def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.curren
         "created_at": report.get("created_at"),
         "role_title": interview["role_title"],
         "interview_mode": interview.get("interview_mode"),
+        "answer_mode": interview.get("answer_mode") or "typed",
+        "recording_parts": recording_parts(interview_id),
         "duration_seconds": interview.get("duration_seconds"),
         "turns": turns,
     }
@@ -615,6 +809,251 @@ def delete_interview(interview_id: str, user: AuthUser = Depends(auth.current_us
     canonical_id = str(uuid.UUID(interview_id))
     shutil.rmtree(os.path.join(UPLOAD_DIR, canonical_id), ignore_errors=True)
     return {"status": "deleted", "interview_id": canonical_id}
+
+
+# -------------------------------------------------------------
+# BLOCK 13b: GET /api/interviews/{id}/media/{n}  (answer playback)
+# -------------------------------------------------------------
+# Owner-only. Recordings are never served from a public path; the browser
+# fetches this with the ID token and plays the result from a blob URL.
+# FileResponse supports HTTP range requests, so seeking works.
+MEDIA_FILE_PATTERN = re.compile(r"^q_\d+(_audio)?\.(webm|mp4|ogg|mp3|wav)$")
+MEDIA_TYPES = {"webm": "video/webm", "mp4": "video/mp4", "ogg": "audio/ogg", "mp3": "audio/mpeg", "wav": "audio/wav"}
+
+
+@app.get("/api/interviews/{interview_id}/media/{question_index}")
+def get_answer_media(
+    interview_id: str,
+    question_index: int,
+    kind: Literal["video", "audio"] = "video",
+    user: AuthUser = Depends(auth.current_user),
+):
+    with transaction("Could not load this recording. Please retry.") as (_conn, cur):
+        owned_interview(cur, interview_id, user, lock=False)
+        cur.execute(
+            """SELECT video_url, audio_path FROM interview_responses
+               WHERE interview_id = %s AND question_index = %s;""",
+            (interview_id, question_index),
+        )
+        row = cur.fetchone()
+
+    stored = (row or {}).get("video_url" if kind == "video" else "audio_path")
+    filename = os.path.basename(stored or "")
+    if not MEDIA_FILE_PATTERN.match(filename):
+        raise HTTPException(404, "No recording for this answer.")
+    path = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)), filename)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "No recording for this answer.")
+    media_type = MEDIA_TYPES[filename.rsplit(".", 1)[1]]
+    if kind == "audio" and media_type.startswith("video/"):
+        media_type = media_type.replace("video/", "audio/")
+    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+
+
+# -------------------------------------------------------------
+# BLOCK 13d: Whole-interview recording, uploaded in chunks
+# -------------------------------------------------------------
+# The browser records the entire interview and sends a chunk about every
+# ten seconds, so a closed tab or crash loses at most a few seconds and no
+# single huge upload is needed. A reload starts a new "part" (a recording
+# cannot be continued after the page is gone). Chunks must arrive in order;
+# a repeated chunk (client retry) is acknowledged without being re-appended.
+_recording_lock = threading.Lock()
+MAX_CHUNK_BYTES = 64 * 1024 * 1024
+
+
+def _session_paths(interview_id: str, part: int, extension: Optional[str] = None):
+    folder = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)))
+    meta = os.path.join(folder, f"session_{part}.json")
+    media = os.path.join(folder, f"session_{part}.{extension}") if extension else None
+    return folder, meta, media
+
+
+def _read_session_meta(meta_path: str) -> Optional[dict]:
+    try:
+        with open(meta_path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def recording_parts(interview_id: str) -> list[int]:
+    """Session-recording part numbers that exist on disk, ascending."""
+    folder = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)))
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(int(m.group(1)) for n in names if (m := re.match(r"^session_(\d+)\.json$", n)))
+
+
+@app.post("/api/interviews/{interview_id}/recording")
+def upload_recording_chunk(
+    interview_id: str,
+    part: int = Form(..., ge=1, le=50),
+    seq: int = Form(..., ge=0),
+    chunk: UploadFile = File(...),
+    user: AuthUser = Depends(auth.current_user),
+):
+    with transaction("Could not save the recording. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user, lock=False)
+        if interview.get("interview_mode") == "game":
+            raise HTTPException(409, "Arena sessions are not recorded.")
+
+    content_type = (chunk.content_type or "").lower()
+    if not content_type.startswith(("video/", "audio/")):
+        raise HTTPException(415, "Upload a video recording chunk.")
+    data = chunk.file.read(MAX_CHUNK_BYTES + 1)
+    if len(data) > MAX_CHUNK_BYTES:
+        raise HTTPException(413, "Recording chunk is too large.")
+
+    folder, meta_path, _ = _session_paths(interview_id, part)
+    with _recording_lock:
+        os.makedirs(folder, exist_ok=True)
+        meta = _read_session_meta(meta_path) or {
+            "next_seq": 0, "bytes": 0,
+            "extension": media_filename(0, "video", content_type).rsplit(".", 1)[1],
+        }
+        if seq < meta["next_seq"]:
+            return {"part": part, "next_seq": meta["next_seq"], "bytes": meta["bytes"], "duplicate": True}
+        if seq > meta["next_seq"]:
+            raise HTTPException(409, f"Expected chunk {meta['next_seq']} for part {part}.")
+        if meta["bytes"] + len(data) > config.MAX_SESSION_RECORDING_MB * 1024 * 1024:
+            raise HTTPException(413, f"The recording exceeds {config.MAX_SESSION_RECORDING_MB} MB.")
+        _, _, media_path = _session_paths(interview_id, part, meta["extension"])
+        with open(media_path, "ab") as handle:
+            handle.write(data)
+        meta.update(next_seq=seq + 1, bytes=meta["bytes"] + len(data))
+        temporary = f"{meta_path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle)
+        os.replace(temporary, meta_path)
+    return {"part": part, "next_seq": meta["next_seq"], "bytes": meta["bytes"]}
+
+
+@app.get("/api/interviews/{interview_id}/recording/{part}")
+def get_session_recording(interview_id: str, part: int, user: AuthUser = Depends(auth.current_user)):
+    """Owner-only playback of one part of the whole-interview recording."""
+    with transaction("Could not load this recording. Please retry.") as (_conn, cur):
+        owned_interview(cur, interview_id, user, lock=False)
+    _, meta_path, _ = _session_paths(interview_id, part)
+    meta = _read_session_meta(meta_path)
+    if not meta:
+        raise HTTPException(404, "No recording for this interview.")
+    _, _, media_path = _session_paths(interview_id, part, meta["extension"])
+    if not os.path.isfile(media_path):
+        raise HTTPException(404, "No recording for this interview.")
+    return FileResponse(media_path, media_type=MEDIA_TYPES.get(meta["extension"], "video/webm"),
+                        headers={"Cache-Control": "private, max-age=3600"})
+
+
+# -------------------------------------------------------------
+# BLOCK 13e: Spoken interviewer (Piper text-to-speech)
+# -------------------------------------------------------------
+# GET /api/interviews/{id}/speech/{item}   item: intro | outro | question-<n>
+# GET /api/speech/{phrase}                 fixed phrases (speaker test, thanks…)
+# Text is always built on the server (questions come from the database), so
+# the endpoints cannot be used to synthesise arbitrary text. 503 means the
+# browser should fall back to its own speech synthesis.
+def _speech_response(text: str):
+    try:
+        path = tts_service.synthesize(text)
+    except tts_service.SpeechUnavailable as err:
+        raise HTTPException(503, str(err))
+    return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "private, max-age=86400"})
+
+
+def _first_name(user: AuthUser) -> Optional[str]:
+    first = (user.name or "").strip().split(" ")[0]
+    first = "".join(ch for ch in first if ch.isalpha() or ch in "-'")
+    return first[:30] or None
+
+
+@app.get("/api/interviews/{interview_id}/speech/{item}")
+def interview_speech(interview_id: str, item: str, user: AuthUser = Depends(auth.current_user)):
+    match = re.fullmatch(r"question-(\d{1,2})", item)
+    with transaction("Could not prepare the spoken question. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user, lock=False)
+        if item == "intro":
+            text = tts_service.intro_text(_first_name(user), interview["role_title"], interview["max_turns"])
+        elif item == "outro":
+            text = tts_service.outro_text()
+        elif match and 1 <= int(match.group(1)) <= interview["current_turn"]:
+            cur.execute(
+                """SELECT question_text, is_follow_up FROM interview_questions
+                   WHERE interview_id = %s AND question_index = %s;""",
+                (interview_id, int(match.group(1))),
+            )
+            question = cur.fetchone()
+            if not question:
+                raise HTTPException(404, "Question not found.")
+            text = tts_service.question_text(int(match.group(1)), question["question_text"],
+                                             bool(question.get("is_follow_up")))
+        else:
+            raise HTTPException(404, "Unknown speech item.")
+    return _speech_response(text)
+
+
+@app.get("/api/speech/{phrase}")
+def speech_phrase(phrase: str, user: AuthUser = Depends(auth.current_user)):
+    text = tts_service.PHRASES.get(phrase)
+    if not text:
+        raise HTTPException(404, "Unknown phrase.")
+    return _speech_response(text)
+
+
+# -------------------------------------------------------------
+# BLOCK 13c: GET /api/interviews/{id}/state  (resume after refresh)
+# -------------------------------------------------------------
+# Lets the interview page continue an active Standard interview after a
+# reload instead of starting a new session.
+#   status          in_progress | completed | evaluated
+#   question        the current public question (no rubric)
+#   answered        candidate-visible results of earlier turns
+#   pending_response_id  set when the current answer was accepted but the
+#                   next question was not yet issued (retry next-question)
+#   awaiting_completion  every turn answered; call /complete next
+@app.get("/api/interviews/{interview_id}/state")
+def get_interview_state(interview_id: str, user: AuthUser = Depends(auth.current_user)):
+    with transaction("Could not load this interview. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user, lock=False)
+        cur.execute(
+            "SELECT * FROM interview_questions WHERE interview_id = %s AND question_index = %s;",
+            (interview_id, interview["current_turn"]),
+        )
+        question = cur.fetchone()
+        cur.execute(
+            """SELECT id, question_index, question_text, difficulty, is_follow_up, topic,
+                      candidate_answer, answer_quality_score, communication_score, criteria_scores,
+                      strengths, improvements, feedback, missing_concepts, evaluation_source, next_result
+               FROM interview_responses WHERE interview_id = %s ORDER BY question_index;""",
+            (interview_id,),
+        )
+        responses = cur.fetchall()
+
+    current = next((r for r in responses if r["question_index"] == interview["current_turn"]), None)
+    final_turn = interview["current_turn"] >= interview["max_turns"]
+    answered = [{
+        "index": r["question_index"], "question": r["question_text"], "difficulty": r["difficulty"],
+        "is_follow_up": bool(r["is_follow_up"]), "topic": r["topic"], "answer": r["candidate_answer"],
+        "response_id": str(r["id"]), "completed": True,
+        "evaluation": adaptive_service.public_evaluation(r),
+        "adaptation": (r.get("next_result") or {}).get("adaptation"),
+    } for r in responses]
+    return {
+        "interview_id": str(interview["id"]),
+        "status": interview["status"],
+        "interview_mode": interview.get("interview_mode"),
+        "role_title": interview["role_title"],
+        "current_turn": interview["current_turn"],
+        "max_turns": interview["max_turns"],
+        "question": adaptive_service.public_question(question) if question else None,
+        "answered": answered,
+        "pending_response_id": str(current["id"]) if current and current.get("next_result") is None else None,
+        "awaiting_completion": bool(current and final_turn and current.get("next_result") is not None),
+        "answer_mode": interview.get("answer_mode") or "typed",
+        "recording_parts": recording_parts(interview_id),
+    }
 
 
 # -------------------------------------------------------------
@@ -719,6 +1158,7 @@ def get_user_reports(firebase_uid: str, user: AuthUser = Depends(auth.current_us
                    r.overall_score, r.answer_quality_score, r.communication_score,
                    COALESCE(r.speech_fluency_score, r.voice_confidence_score) AS speech_fluency_score,
                    r.camera_engagement_score, r.strengths, r.improvements,
+                   r.criteria_scores, r.speech_metrics,
                    r.created_at AS evaluated_at
             FROM evaluation_reports r
             JOIN interviews i ON i.id = r.interview_id
@@ -740,6 +1180,16 @@ def health():
         "status": "ok",
         "database": database.test_db_connection(),
         "gemini_configured": bool(config.GEMINI_API_KEY),
+        "speech_to_text": {
+            "provider": config.STT_PROVIDER,
+            "model": config.STT_MODEL if config.STT_PROVIDER == "whisper" else None,
+            "loaded": stt_service.is_loaded(),
+        },
+        "text_to_speech": {
+            "provider": config.TTS_PROVIDER,
+            "voice": config.PIPER_VOICE if config.TTS_PROVIDER == "piper" else None,
+            "loaded": tts_service.is_loaded(),
+        },
     }
 
 

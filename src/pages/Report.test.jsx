@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import Report from './Report';
-vi.mock('../services/api', () => ({ api: { getReport: vi.fn().mockResolvedValue({ overall_score: 80, interview_id: 'current' }) } }));
+vi.mock('../services/api', () => ({ api: { getReport: vi.fn().mockResolvedValue({ overall_score: 80, interview_id: 'current' }), getAnswerMediaUrl: vi.fn().mockResolvedValue('blob:recording') } }));
 afterEach(() => { cleanup(); localStorage.clear(); });
 it('shows the current interview journey with difficulty, follow-up and feedback', async () => {
   localStorage.setItem('current-interview-id', 'current');
@@ -42,4 +42,30 @@ it('opens a saved report by ?id= using server turns and omits missing camera dat
   expect(screen.getByText('Adaptation: Keep level')).toBeInTheDocument();
   expect(screen.getByText(/Approximate score/)).toBeInTheDocument();
   expect(screen.queryByText('Camera Engagement')).not.toBeInTheDocument();
+});
+it('shows criteria, delivery, score weights and per-turn speech details with playback', async () => {
+  URL.revokeObjectURL = vi.fn(); // not implemented by jsdom
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'v2', overall_score: 81, role_title: 'Backend Engineer',
+    scores: [{ label: 'Answer Quality', value: 84 }],
+    criteria_scores: { correctness: 88, completeness: 62, technical_depth: 75, relevance: 95 },
+    speech_metrics: { answers_with_audio: 2, words_per_minute: 134, fillers_per_minute: 1.5, long_pauses: 1, delivery_score: 90 },
+    vision_metrics: { answers_with_camera: 2, eyeContact: 82, facePresence: 97, cameraFacing: 90, multipleFaceEvents: 0 },
+    scoring: { version: 2, weights: { answer_quality: 0.4, communication: 0.25, camera_engagement: 0.2, speech_fluency: 0.15 } },
+    turns: [{ index: 1, question: 'Design a rate limiter', difficulty: 'medium', answer: 'Token bucket per key.', transcript_source: 'whisper',
+      has_video: true, evaluation: { answer_quality_score: 84, criteria_scores: { correctness: 88, completeness: 62, technical_depth: 75, relevance: 95 } },
+      speech_metrics: { words_per_minute: 134, filler_count: 2, long_pauses: 0 }, vision_metrics: { eyeContact: 82, facePresence: 97 } }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=v2']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  expect(await screen.findByText('Answer criteria')).toBeInTheDocument();
+  expect(screen.getByLabelText('Completeness: 62%')).toBeInTheDocument();
+  expect(screen.getByText('134 wpm', { selector: 'dd' })).toBeInTheDocument();
+  expect(screen.getByText('How this score was calculated')).toBeInTheDocument();
+  expect(screen.getByText('Speech fluency')).toBeInTheDocument();
+  expect(screen.getByText('Spoken answer')).toBeInTheDocument();
+  expect(screen.getByText('Token bucket per key.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Play recording' }));
+  await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'blob:recording'));
+  expect(api.getAnswerMediaUrl).toHaveBeenCalledWith('v2', 1, 'video');
 });

@@ -40,3 +40,6 @@ report_template.html
 *.pdf
 *.png
 
+# Downloaded Piper voices and synthesised speech cache
+backend/voices/
+backend/tts_cache/

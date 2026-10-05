@@ -9,9 +9,13 @@ import re
 # ("I like Python") are also counted, so the metric is an approximation.
 COMMON_FILLER_WORDS = [
     "um",
+    "umm",
     "uh",
+    "uhh",
     "er",
+    "erm",
     "ah",
+    "hmm",
     "like",
     "you know",
     "actually",

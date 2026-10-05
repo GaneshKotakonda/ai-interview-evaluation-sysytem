@@ -30,7 +30,7 @@ export default function AuthShell({ title, description, children, footer }) {
         <Brand />
         <div className="flex flex-1 items-center py-12">
           <div className="page-enter mx-auto w-full max-w-[380px]">
-            <h1 className="font-serif text-[2.1rem] tracking-[-0.02em] tracking-[-0.02em] leading-[1.05] text-ink">{title}</h1>
+            <h1 className="font-serif text-[2.1rem] tracking-[-0.02em] leading-[1.05] text-ink">{title}</h1>
             {description && <p className="mt-3 text-[15px] leading-relaxed text-ink-2">{description}</p>}
             <div className="mt-8">{children}</div>
             {footer && <p className="mt-8 text-sm text-ink-3">{footer}</p>}
