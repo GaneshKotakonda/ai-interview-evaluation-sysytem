@@ -246,6 +246,31 @@ ALTER TABLE interview_responses
     ADD COLUMN IF NOT EXISTS answer_start_seconds FLOAT CHECK (answer_start_seconds >= 0),
     ADD COLUMN IF NOT EXISTS answer_end_seconds FLOAT CHECK (answer_end_seconds >= 0);
 
+-- 8c. Proctoring (interview integrity). One row per episode of leaving the
+-- interview (fullscreen exit / tab switch / other window) or blocked
+-- action. client_event_id makes browser retries idempotent.
+CREATE TABLE IF NOT EXISTS proctoring_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    client_event_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(30) NOT NULL,
+    question_index INT,
+    recording_part INT,
+    at_seconds FLOAT CHECK (at_seconds >= 0),
+    duration_seconds FLOAT CHECK (duration_seconds >= 0),
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (interview_id, client_event_id)
+);
+CREATE INDEX IF NOT EXISTS proctoring_events_interview_idx ON proctoring_events(interview_id);
+
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS ended_early BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS end_reason VARCHAR(30);
+
+ALTER TABLE evaluation_reports
+    ADD COLUMN IF NOT EXISTS integrity JSONB;
+
 -- 9. Indexes for the hot lookups
 CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);
 CREATE INDEX IF NOT EXISTS question_rubrics_lookup_idx ON question_rubrics(interview_id, question_index);

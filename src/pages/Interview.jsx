@@ -4,6 +4,7 @@ import {
   Camera,
   Mic,
   RotateCcw,
+  ShieldAlert,
   SkipForward,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -17,6 +18,9 @@ import { speak, stopSpeaking, playTurnChime } from '../services/speech';
 import { createVoiceMonitor } from '../services/voiceActivity';
 import { startAnswerRecording } from '../services/answerRecorder';
 import { startSessionRecording } from '../services/sessionRecorder';
+import {
+  enterFullscreen, exitFullscreen, fullscreenSupported, hasMultipleDisplays, startProctoring,
+} from '../services/proctoring';
 import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
@@ -88,6 +92,13 @@ export default function Interview() {
   const startRequestRef = useRef(null);
   const resumeRef = useRef(null);           // /state payload when resuming
   const beganAtRef = useRef(null);
+  // Proctoring
+  const proctorRef = useRef(null);
+  const violationsRef = useRef(0);
+  const maxViolationsRef = useRef(5);
+  const eventQueueRef = useRef([]);
+  const terminatedRef = useRef(false);
+  const turnRef = useRef(1);
 
   // -------------------------------------------------------------
   // BLOCK 2: State
@@ -107,6 +118,10 @@ export default function Interview() {
   const [elapsed, setElapsed] = useState(0);
   const [listen, setListen] = useState({ level: 0, countdown: null, seconds: 0, noVoice: false });
   const [recordingIssue, setRecordingIssue] = useState(false);
+  const [away, setAway] = useState(null);           // current "left the interview" episode
+  const [violations, setViolations] = useState(0);
+  const [maxViolations, setMaxViolations] = useState(5);
+  const multipleDisplays = useMemo(() => hasMultipleDisplays(), []);
 
   const targetRole = useMemo(() => localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer', []);
   const targetJd = useMemo(() => localStorage.getItem(STORAGE_KEYS.jobDescription) || '', []);
@@ -154,6 +169,10 @@ export default function Interview() {
         }
         if (!data?.question?.question || !data.interview_id) throw new Error('Invalid interview session');
         setInterviewId(data.interview_id);
+        maxViolationsRef.current = data.proctoring?.max_violations || 5;
+        setMaxViolations(maxViolationsRef.current);
+        violationsRef.current = data.proctoring?.violations || 0;
+        setViolations(violationsRef.current);
         setQuestion(data.question);
         setCurrentTurn(data.current_turn);
         setMaxTurns(data.max_turns);
@@ -209,6 +228,8 @@ export default function Interview() {
     })();
     return () => {
       unmountedRef.current = true;
+      proctorRef.current?.stop();
+      exitFullscreen();
       stopSpeaking();
       monitorRef.current?.stop();
       answerRecRef.current?.cancel?.();
@@ -232,6 +253,8 @@ export default function Interview() {
     return () => clearInterval(timer);
   }, [stage]);
 
+  useEffect(() => { turnRef.current = currentTurn; }, [currentTurn]);
+
   // Keep the journey in storage for the completion page and the report.
   useEffect(() => {
     if (interviewId && responses.length) {
@@ -245,7 +268,7 @@ export default function Interview() {
   // speak question → chime → listen → (Next | silence | time limit) →
   // transcribe → grade silently → speak next question … → outro → report.
   const startListening = useCallback(() => {
-    if (unmountedRef.current) return;
+    if (unmountedRef.current || terminatedRef.current) return;
     answerStartRef.current = sessionRef.current?.elapsedSeconds() ?? 0;
     setListen({ level: 0, countdown: null, seconds: 0, noVoice: false });
     pendingAudioRef.current = null;
@@ -257,19 +280,21 @@ export default function Interview() {
   }, [voiceMode]);
 
   const askQuestion = useCallback(async (nextQuestion, id) => {
-    if (unmountedRef.current) return;
+    if (unmountedRef.current || terminatedRef.current) return;
     setQuestion(nextQuestion);
     setTypedAnswer('');
     noSpeechRetriesRef.current = 0;
     setStage('speaking');
     await speak({ interviewId: id, item: `question-${nextQuestion.index}` },
       `Question ${nextQuestion.index}. ${nextQuestion.question}`);
-    if (unmountedRef.current) return;
+    if (unmountedRef.current || terminatedRef.current) return;
     playTurnChime();
     startListening();
   }, [startListening]);
 
   const finishInterview = useCallback(async (id) => {
+    if (terminatedRef.current) return;
+    proctorRef.current?.stop();
     setStage('finishing');
     monitorRef.current?.stop();
     const duration = beganAtRef.current ? Math.round((Date.now() - beganAtRef.current) / 1000) : 0;
@@ -281,9 +306,95 @@ export default function Interview() {
     if (visionMetricsRef.current) {
       localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
     }
+    await flushEvents(id);
+    await exitFullscreen();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if (!unmountedRef.current) navigate('/interview-complete');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate]);
+
+  // -------------------------------------------------------------
+  // BLOCK 5b: Proctoring
+  // -------------------------------------------------------------
+  // Integrity events are queued and sent in order; a failed send stays in
+  // the queue and goes with the next one (the server ignores repeats).
+  async function flushEvents(id = interviewId) {
+    if (!id || !eventQueueRef.current.length || typeof api.reportProctoringEvents !== 'function') return;
+    const batch = eventQueueRef.current.slice(0, 50);
+    try {
+      await api.reportProctoringEvents(id, batch);
+      eventQueueRef.current = eventQueueRef.current.slice(batch.length);
+    } catch {
+      // Kept for the next attempt.
+    }
+  }
+
+  const queueEvent = (event) => {
+    eventQueueRef.current.push({
+      id: event.id,
+      type: event.type,
+      question_index: event.question_index ?? null,
+      part: event.part ?? null,
+      at: event.at ?? null,
+      duration: event.duration ?? null,
+      details: event.details || {},
+    });
+    flushEvents();
+  };
+
+  const proctorContext = () => ({
+    question_index: turnRef.current,
+    part: sessionRef.current?.part ?? null,
+    at: sessionRef.current ? sessionRef.current.elapsedSeconds() : null,
+  });
+
+  // Too many violations: end the interview now; unanswered questions score 0.
+  const terminate = useCallback(async () => {
+    if (terminatedRef.current) return;
+    terminatedRef.current = true;
+    proctorRef.current?.stop();
+    setAway(null);
+    setStage('terminated');
+    stopSpeaking();
+    answerRecRef.current?.cancel?.();
+    monitorRef.current?.stop();
+    localStorage.setItem(STORAGE_KEYS.endedEarly, '1');
+    const duration = beganAtRef.current ? Math.round((Date.now() - beganAtRef.current) / 1000) : 0;
+    localStorage.setItem(DURATION_KEY, String(duration));
+    if (visionMetricsRef.current) {
+      localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
+    }
+    await Promise.all([flushEvents(), sessionRef.current?.stop() ?? Promise.resolve()]);
+    await exitFullscreen();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    if (!unmountedRef.current) setTimeout(() => navigate('/interview-complete'), 2500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigate, interviewId]);
+
+  const startWatching = () => {
+    proctorRef.current?.stop();
+    proctorRef.current = startProctoring({
+      context: proctorContext,
+      onLeave: (episode) => {
+        violationsRef.current += 1;
+        setViolations(violationsRef.current);
+        setAway(episode);
+        queueEvent({ ...episode, details: { types: [...episode.types] } });
+        if (violationsRef.current >= maxViolationsRef.current) terminate();
+      },
+      onReturn: (episode) => {
+        setAway(null);
+        queueEvent({ ...episode, details: { types: episode.types } });
+      },
+      onMinor: (event) => queueEvent(event),
+    });
+  };
+
+  const returnToInterview = async () => {
+    await enterFullscreen();
+    window.focus?.();
+    proctorRef.current?.check();
+  };
 
   // Submit (once) and advance. Retries reuse the accepted response.
   const submitAndAdvance = useCallback(async (id, turnQuestion, text) => {
@@ -380,6 +491,8 @@ export default function Interview() {
   const begin = useCallback(async () => {
     if (!interviewId || busyRef.current) return;
     beganAtRef.current = Date.now();
+    // Fullscreen needs this click (a user gesture); then watch for leaving.
+    const fullscreen = await enterFullscreen();
     const resumed = resumeRef.current;
     const part = (resumed?.recording_parts?.length ? Math.max(...resumed.recording_parts) : 0) + 1;
     if (streamRef.current) {
@@ -389,6 +502,9 @@ export default function Interview() {
       });
       if (voiceMode) monitorRef.current = createVoiceMonitor(streamRef.current);
     }
+    startWatching();
+    if (!fullscreen) queueEvent({ id: `fs-${Date.now()}`, type: 'fullscreen_unavailable', ...proctorContext() });
+    if (multipleDisplays) queueEvent({ id: `md-${Date.now()}`, type: 'multiple_displays', ...proctorContext() });
     if (resumed?.pending_response_id) {
       // The last answer was saved before the reload; continue from it.
       pendingRef.current = { text: '' };
@@ -401,7 +517,8 @@ export default function Interview() {
         `Welcome to your ${targetRole} interview. Answer each question out loud, then pause or select Next.`);
     }
     await askQuestion(question, interviewId);
-  }, [interviewId, question, voiceMode, targetRole, askQuestion, finishAnswer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interviewId, question, voiceMode, targetRole, askQuestion, finishAnswer, multipleDisplays]);
 
   const repeatQuestion = useCallback(async () => {
     answerRecRef.current?.cancel?.();
@@ -415,6 +532,8 @@ export default function Interview() {
   useEffect(() => {
     if (stage !== 'listening' || !voiceMode) return undefined;
     const timer = setInterval(() => {
+      // While the candidate is away the answer cannot end by silence.
+      if (proctorRef.current?.isAway()) return;
       const snapshot = monitorRef.current?.snapshot();
       if (!snapshot) {
         const seconds = (sessionRef.current?.elapsedSeconds() ?? 0) - answerStartRef.current;
@@ -435,6 +554,8 @@ export default function Interview() {
     }, TICK_MS);
     return () => clearInterval(timer);
   }, [stage, voiceMode, finishAnswer]);
+  // `fullscreenSupported` is used for the ready-screen rules below.
+  const canFullscreen = fullscreenSupported();
 
   // -------------------------------------------------------------
   // BLOCK 7: Render
@@ -487,7 +608,14 @@ export default function Interview() {
                   {voiceMode ? 'Answer out loud. Select Next when you finish, or pause and the interview moves on.' : 'Type each answer and submit it.'}
                 </li>
                 <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />The whole interview is recorded on camera. Your report appears at the end.</li>
+                <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-bad" />
+                  <span>
+                    <span className="font-medium text-ink">Stay in the interview.</span>{' '}
+                    {canFullscreen ? 'It runs in fullscreen. ' : ''}Switching tabs, windows or apps, copying and pasting are recorded; after {maxViolations} times the interview ends automatically.
+                  </span>
+                </li>
               </ul>
+              {multipleDisplays && <Notice tone="warn" className="mt-6">A second display is connected. Disconnect it before starting; this is recorded in your report.</Notice>}
               {resumed && <Notice className="mt-6">Your earlier answers are saved. The interview continues from question {currentTurn}.</Notice>}
               {mediaError && <Notice tone="warn" className="mt-6">{mediaError}</Notice>}
               {voiceBlocked && !mediaError && <Notice tone="warn" className="mt-6">Waiting for microphone access…</Notice>}
@@ -505,6 +633,19 @@ export default function Interview() {
     );
   }
 
+  if (stage === 'terminated') {
+    return (
+      <Panel className="mx-auto max-w-xl p-8 text-center">
+        <ShieldAlert className="mx-auto h-8 w-8 text-bad" />
+        <h1 className="mt-4 font-serif text-[2rem] leading-tight text-ink">Interview ended</h1>
+        <p className="mt-3 text-sm leading-relaxed text-ink-2">
+          You left the interview {violations} times. Your answers so far are saved and graded; unanswered questions score 0.
+        </p>
+        <p className="mt-4 flex items-center justify-center gap-2 text-xs text-ink-3"><Spinner /> Saving the recording and preparing your report…</p>
+      </Panel>
+    );
+  }
+
   const statusLine = {
     speaking: 'Interviewer is asking…',
     listening: voiceMode ? 'Listening' : 'Your answer',
@@ -515,6 +656,21 @@ export default function Interview() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
+      {away && (
+        <div className="fade-in fixed inset-0 z-[60] grid place-items-center bg-ink/80 p-4 backdrop-blur-sm">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="away-title" className="scale-in w-full max-w-md rounded-panel border border-line bg-surface p-7 text-center shadow-pop">
+            <ShieldAlert className="mx-auto h-8 w-8 text-bad" />
+            <h2 id="away-title" className="mt-4 font-serif text-[1.8rem] leading-tight text-ink">You left the interview</h2>
+            <p className="mt-3 text-sm leading-relaxed text-ink-2">
+              Leaving fullscreen, switching tabs or opening other windows and apps is not allowed and has been recorded.
+            </p>
+            <p className="mt-4 text-sm font-medium text-bad">Warning {violations} of {maxViolations}</p>
+            <p className="mt-1 text-xs text-ink-3">At {maxViolations} the interview ends and unanswered questions score 0.</p>
+            <button className="primary-btn mt-6 w-full !py-3" onClick={returnToInterview}>Return to the interview</button>
+          </div>
+        </div>
+      )}
+
       {/* Header: role, question counter, recording, elapsed time, progress */}
       <header className="reveal space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -681,6 +837,7 @@ export default function Interview() {
                 ['Microphone', microphoneReady ? 'Active' : 'Unavailable', microphoneReady],
                 ['Answer mode', voiceMode ? 'Spoken' : 'Typed', true],
                 ['Answered', `${responses.filter((item) => item.completed).length} of ${maxTurns}`, true],
+                ['Integrity warnings', `${violations} of ${maxViolations}`, violations === 0],
               ].map(([label, value, ok]) => (
                 <li key={label} className="flex items-center justify-between py-2.5 text-[13px]">
                   <span className="text-ink-2">{label}</span>

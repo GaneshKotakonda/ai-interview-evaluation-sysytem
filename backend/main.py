@@ -14,6 +14,7 @@ Endpoints (all under /api):
     GET  /interviews/{id}/recording/{part}  owner-only interview recording
     GET  /interviews/{id}/speech/{item}     spoken intro/outro/question (Piper)
     GET  /speech/{phrase}                   fixed spoken phrases (Piper)
+    POST /interviews/{id}/proctoring        integrity events (leaving the interview…)
     POST /interviews/{id}/submit-answer     save, embed and grade one answer
     POST /interviews/{id}/next-question     apply policy, issue the next turn
     POST /interviews/{id}/hint              Arena only: spend the one hint
@@ -50,6 +51,7 @@ import arena
 import auth
 from auth import AuthUser
 import database
+import integrity
 import gemini_service
 import scoring
 import speech_analysis
@@ -238,6 +240,23 @@ class EvaluateInterviewRequest(BaseModel):
     # when the camera model never produced data.
     vision_metrics: Optional[dict] = None
     duration_seconds: int = Field(default=0, ge=0, le=24 * 60 * 60)
+    # True when proctoring ended the interview before every turn was
+    # answered; unanswered turns then score 0.
+    ended_early: bool = False
+
+
+class ProctoringEvent(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    type: str = Field(max_length=30)
+    question_index: Optional[int] = Field(default=None, ge=1, le=50)
+    part: Optional[int] = Field(default=None, ge=1, le=50)
+    at: Optional[float] = Field(default=None, ge=0, le=24 * 60 * 60)
+    duration: Optional[float] = Field(default=None, ge=0, le=24 * 60 * 60)
+    details: dict = Field(default_factory=dict)
+
+
+class ProctoringBatch(BaseModel):
+    events: list[ProctoringEvent] = Field(max_length=50)
 
 
 def _clean(value: Optional[str]) -> Optional[str]:
@@ -279,6 +298,7 @@ def completion_response(report):
             "version": report.get("scoring_version") or 1,
             "weights": report.get("scoring_weights"),
         },
+        "integrity": report.get("integrity"),
     }
 
 
@@ -360,6 +380,7 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         "job_description": payload.job_description,
         "interview_mode": payload.interview_mode,
         "answer_mode": "typed" if payload.interview_mode == "game" else payload.answer_mode,
+        "proctoring": {"max_violations": config.PROCTORING_MAX_VIOLATIONS},
         "current_turn": 1, "current_difficulty": "medium",
         "max_turns": max_turns, "question": question,
         # Shape compatibility only: one turn, never a pre-generated set.
@@ -602,11 +623,16 @@ def complete_and_evaluate_interview(
             (interview_id,)
         )
         responses = cur.fetchall()
-        if not responses:
+        ended_early = bool(payload.ended_early)
+        if not responses and not ended_early:
             raise HTTPException(status_code=400, detail="No answers found for this interview.")
 
         adaptive_responses = [r for r in responses if r.get("question_id")]
-        if adaptive_responses and (
+        if ended_early:
+            # Proctoring ended the interview: grade only accepted, evaluated answers.
+            adaptive_responses = [r for r in adaptive_responses if r["evaluated_at"] is not None]
+            responses = [r for r in responses if not r.get("question_id") or r["evaluated_at"] is not None]
+        elif adaptive_responses and (
             len(adaptive_responses) != interview["max_turns"]
             or any(r["evaluated_at"] is None for r in adaptive_responses)
         ):
@@ -614,7 +640,7 @@ def complete_and_evaluate_interview(
 
         # Step B: Per-answer evaluations (saved, or batch-graded for legacy).
         filler_summary = scoring.aggregate_fillers(r["candidate_answer"] for r in responses)
-        if adaptive_responses:
+        if adaptive_responses or not responses:
             batch_result = {"question_evaluations": adaptive_responses, "overall_summary": ""}
         else:
             batch_result = gemini_service.batch_evaluate_interview(
@@ -622,7 +648,12 @@ def complete_and_evaluate_interview(
                 job_description=interview["job_description"],
                 evaluation_items=_legacy_evaluation_items(cur, interview_id, responses),
             )
-        evaluations = batch_result.get("question_evaluations", [])
+        evaluations = list(batch_result.get("question_evaluations", []))
+        if ended_early:
+            # Each question never answered counts as 0, so ending early can
+            # never raise the average.
+            missing = max(0, interview["max_turns"] - len(evaluations))
+            evaluations += [{"answer_quality_score": 0, "communication_score": 0}] * missing
 
         # Step C: Component scores and weighted overall score (scoring v2).
         neutral = scoring.NEUTRAL_SCORE
@@ -637,6 +668,8 @@ def complete_and_evaluate_interview(
         speech_summary = speech_analysis.summarize([r.get("speech_metrics") for r in responses])
         if speech_summary and speech_summary.get("delivery_score") is not None:
             fluency = speech_summary["delivery_score"]
+        elif not responses:
+            fluency = None
         else:
             fluency = scoring.speech_fluency(filler_summary["total_fillers"], len(responses))
 
@@ -654,6 +687,13 @@ def complete_and_evaluate_interview(
 
         overall = scoring.overall_score(answer_quality, communication, camera, fluency)
         weights = scoring.applied_weights(answer_quality, communication, camera, fluency)
+
+        # Integrity: reported beside the score, never folded into it.
+        cur.execute(
+            "SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id = %s;",
+            (interview_id,),
+        )
+        integrity_summary = integrity.summarize(cur.fetchall(), vision_summary, ended_early)
 
         # Step D: One holistic pass over the whole transcript (adaptive
         # sessions; legacy batch grading already wrote a summary), then the
@@ -692,6 +732,12 @@ def complete_and_evaluate_interview(
                 f"Overall score: {overall}/100. "
                 f"Answer quality averaged {answer_quality}% and {camera_text}. {speech_text}"
             )
+        if ended_early:
+            summary_feedback = (
+                "This interview ended early after repeated integrity violations "
+                "(leaving the interview window); unanswered questions were scored 0. "
+                + summary_feedback
+            )
 
         # Step E: Persist the report and close the interview.
         cur.execute(
@@ -700,8 +746,8 @@ def complete_and_evaluate_interview(
                 interview_id, answer_quality_score, communication_score,
                 voice_confidence_score, speech_fluency_score, camera_engagement_score, overall_score,
                 vision_metrics, nlp_metrics, strengths, improvements, summary_feedback,
-                criteria_scores, speech_metrics, scoring_version, scoring_weights
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                criteria_scores, speech_metrics, scoring_version, scoring_weights, integrity
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """,
             (
@@ -712,7 +758,7 @@ def complete_and_evaluate_interview(
                 top_strengths, top_improvements, summary_feedback,
                 json.dumps(criteria) if criteria else None,
                 json.dumps(speech_summary) if speech_summary else None,
-                scoring.SCORING_VERSION, json.dumps(weights),
+                scoring.SCORING_VERSION, json.dumps(weights), json.dumps(integrity_summary),
             )
         )
         cur.execute(
@@ -721,10 +767,12 @@ def complete_and_evaluate_interview(
             SET status = 'completed',
                 overall_score = %s,
                 duration_seconds = %s,
-                completed_at = NOW()
+                completed_at = NOW(),
+                ended_early = %s,
+                end_reason = %s
             WHERE id = %s;
             """,
-            (overall, payload.duration_seconds, interview_id)
+            (overall, payload.duration_seconds, ended_early, "integrity" if ended_early else None, interview_id)
         )
 
     return completion_response({
@@ -738,7 +786,7 @@ def complete_and_evaluate_interview(
         "summary_feedback": summary_feedback, "nlp_metrics": filler_summary,
         "criteria_scores": criteria, "speech_metrics": speech_summary,
         "vision_metrics": vision_metrics, "scoring_version": scoring.SCORING_VERSION,
-        "scoring_weights": weights,
+        "scoring_weights": weights, "integrity": integrity_summary,
     })
 
 
@@ -754,6 +802,14 @@ def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.curren
         if not report:
             raise HTTPException(status_code=404, detail="Report not found.")
         turns = adaptive_service.report_turns(cur, interview_id)
+        cur.execute(
+            """SELECT event_type, question_index, recording_part, at_seconds, duration_seconds
+               FROM proctoring_events WHERE interview_id = %s
+               ORDER BY recording_part NULLS FIRST, at_seconds NULLS FIRST;""",
+            (interview_id,),
+        )
+        events = [{**row, "label": integrity.LABELS.get(row["event_type"], row["event_type"]),
+                   "major": row["event_type"] in integrity.MAJOR_EVENTS} for row in cur.fetchall()]
 
     return {
         **completion_response(report),
@@ -768,6 +824,8 @@ def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.curren
         "recording_parts": recording_parts(interview_id),
         "duration_seconds": interview.get("duration_seconds"),
         "turns": turns,
+        "proctoring_events": events,
+        "ended_early": bool(interview.get("ended_early")),
     }
 
 
@@ -784,7 +842,8 @@ def get_user_interviews(firebase_uid: str, user: AuthUser = Depends(auth.current
             return []
         cur.execute(
             """
-            SELECT id, role_title, interview_mode, status, duration_seconds, overall_score, created_at, completed_at
+            SELECT id, role_title, interview_mode, status, duration_seconds, overall_score, created_at, completed_at,
+                   ended_early
             FROM interviews
             WHERE user_id = %s
             ORDER BY created_at DESC;
@@ -948,6 +1007,43 @@ def get_session_recording(interview_id: str, part: int, user: AuthUser = Depends
 
 
 # -------------------------------------------------------------
+# BLOCK 13f: POST /api/interviews/{id}/proctoring  (integrity events)
+# -------------------------------------------------------------
+# The browser sends integrity events as they happen (and again on retry);
+# client_event_id makes repeats harmless. Only active Standard interviews.
+@app.post("/api/interviews/{interview_id}/proctoring")
+def record_proctoring_events(interview_id: str, payload: ProctoringBatch,
+                             user: AuthUser = Depends(auth.current_user)):
+    with transaction("Could not record the integrity event. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user, lock=False)
+        if interview.get("interview_mode") == "game":
+            raise HTTPException(409, "Arena sessions are not proctored.")
+        adaptive_service.require_active(interview)
+        stored = 0
+        for event in payload.events:
+            if event.type not in integrity.EVENT_TYPES:
+                continue
+            cur.execute(
+                """INSERT INTO proctoring_events
+                   (interview_id, client_event_id, event_type, question_index, recording_part,
+                    at_seconds, duration_seconds, details)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (interview_id, client_event_id) DO UPDATE
+                   SET duration_seconds = COALESCE(EXCLUDED.duration_seconds, proctoring_events.duration_seconds);""",
+                (interview_id, event.id, event.type, event.question_index, event.part,
+                 event.at, event.duration, json.dumps(event.details)[:2000]),
+            )
+            stored += 1
+        cur.execute(
+            "SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id = %s;",
+            (interview_id,),
+        )
+        summary = integrity.summarize(cur.fetchall())
+    return {"stored": stored, "violations": summary["violations"],
+            "max_violations": config.PROCTORING_MAX_VIOLATIONS}
+
+
+# -------------------------------------------------------------
 # BLOCK 13e: Spoken interviewer (Piper text-to-speech)
 # -------------------------------------------------------------
 # GET /api/interviews/{id}/speech/{item}   item: intro | outro | question-<n>
@@ -1031,6 +1127,12 @@ def get_interview_state(interview_id: str, user: AuthUser = Depends(auth.current
         )
         responses = cur.fetchall()
 
+        cur.execute(
+            "SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id = %s;",
+            (interview_id,),
+        )
+        violations = integrity.summarize(cur.fetchall())["violations"]
+
     current = next((r for r in responses if r["question_index"] == interview["current_turn"]), None)
     final_turn = interview["current_turn"] >= interview["max_turns"]
     answered = [{
@@ -1053,6 +1155,10 @@ def get_interview_state(interview_id: str, user: AuthUser = Depends(auth.current
         "awaiting_completion": bool(current and final_turn and current.get("next_result") is not None),
         "answer_mode": interview.get("answer_mode") or "typed",
         "recording_parts": recording_parts(interview_id),
+        "proctoring": {
+            "max_violations": config.PROCTORING_MAX_VIOLATIONS,
+            "violations": violations,
+        },
     }
 
 

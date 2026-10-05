@@ -44,6 +44,7 @@ services:
       PIPER_VOICE: ${PIPER_VOICE:-en_US-lessac-medium}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
       MAX_SESSION_RECORDING_MB: ${MAX_SESSION_RECORDING_MB:-800}
+      PROCTORING_MAX_VIOLATIONS: ${PROCTORING_MAX_VIOLATIONS:-5}
     volumes:
       - uploads:/app/backend/uploads
       - tts_cache:/app/backend/tts_cache

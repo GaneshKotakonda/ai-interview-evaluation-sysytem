@@ -26,6 +26,7 @@ export default function InterviewComplete() {
   // -------------------------------------------------------------
   const duration = Number(localStorage.getItem(STORAGE_KEYS.duration));
   const interviewId = localStorage.getItem(STORAGE_KEYS.interviewId);
+  const endedEarly = localStorage.getItem(STORAGE_KEYS.endedEarly) === '1';
 
   // Real camera measurements from the interview, or null when the vision
   // model never produced data (the report then omits camera engagement).
@@ -65,6 +66,8 @@ export default function InterviewComplete() {
           interviewId,
           visionMetrics || {},
           Number.isFinite(duration) && duration > 0 ? duration : 0,
+          // Proctoring ended the interview: unanswered questions score 0.
+          ...(endedEarly ? [true] : []),
         );
 
         if (!isMounted) return;
@@ -149,9 +152,11 @@ export default function InterviewComplete() {
             <circle cx="32" cy="32" r="29" fill="none" stroke="#171611" strokeWidth="2" pathLength="100" className="draw" style={{ '--len': 100 }} />
             <path d="M20 33 l8 8 l16 -17" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />
           </svg>
-          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>Interview complete</h1>
+          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>{endedEarly ? 'Interview ended early' : 'Interview complete'}</h1>
           <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
-            Your answers and recordings are saved. We are combining every turn into your final report.
+            {endedEarly
+              ? 'The interview ended after repeated integrity violations. Your answers so far are saved; unanswered questions score 0.'
+              : 'Your answers and recordings are saved. We are combining every turn into your final report.'}
           </p>
 
           <dl className="reveal mx-auto mt-8 grid max-w-xl grid-cols-3 divide-x divide-line rounded-control border border-line" style={{ '--i': 4 }}>

@@ -69,3 +69,25 @@ it('shows criteria, delivery, score weights and per-turn speech details with pla
   await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'blob:recording'));
   expect(api.getAnswerMediaUrl).toHaveBeenCalledWith('v2', 1, 'video');
 });
+it('shows the integrity summary, event timeline and an ended-early notice', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'pr', overall_score: 40, role_title: 'Backend Engineer', ended_early: true,
+    scores: [{ label: 'Answer Quality', value: 40 }],
+    integrity: { level: 'flagged', violations: 5, time_away_seconds: 63.4, counts: { window_blur: 4, tab_hidden: 1, paste_blocked: 2 },
+      multiple_face_events: 1, low_presence_answers: 0, ended_early: true },
+    proctoring_events: [
+      { event_type: 'window_blur', label: 'Switched to another window or app', major: true, question_index: 2, recording_part: 1, at_seconds: 75, duration_seconds: 12 },
+      { event_type: 'paste_blocked', label: 'Paste blocked', major: false, question_index: 3, recording_part: 1, at_seconds: 130, duration_seconds: null },
+    ],
+    turns: [],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=pr']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  expect(await screen.findByText('Integrity')).toBeInTheDocument();
+  expect(screen.getByText('Flagged')).toBeInTheDocument();
+  expect(screen.getByText('5×')).toBeInTheDocument();
+  expect(screen.getByText('63 s')).toBeInTheDocument();
+  expect(screen.getByText('Switched to another window or app')).toBeInTheDocument();
+  expect(screen.getByText(/12 s away/)).toBeInTheDocument();
+  expect(screen.getByText(/ended early after the candidate repeatedly left/)).toBeInTheDocument();
+});

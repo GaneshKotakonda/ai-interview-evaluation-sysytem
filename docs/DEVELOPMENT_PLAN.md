@@ -4,6 +4,8 @@
 >
 > **Update — voice interview:** one-click spoken interview with Piper text-to-speech, silence detection, whole-session chunked recording, hidden per-answer grading with a holistic final evaluation, and a typed accessibility mode. Verified by backend and frontend tests and an end-to-end run on the real stack (PostgreSQL, Gemini, Whisper, Piper).
 >
+> **Version 1 complete:** proctoring added (fullscreen, leaving-the-interview detection, blocked copy/paste, second display, camera signals, automatic end at the violation limit, Integrity report). **Version 2:** coding round with VPL (Virtual Programming Lab) and Safe Exam Browser lockdown.
+>
 > Decisions taken: keep **PostgreSQL** (not Firestore); **faster-whisper** for speech-to-text with Gemini as fallback; recordings served through the **authenticated backend endpoint** (not Firebase Storage).
 
 Snapshot: 5 October 2026 · branch `Shafreed` · commit `78f6887`

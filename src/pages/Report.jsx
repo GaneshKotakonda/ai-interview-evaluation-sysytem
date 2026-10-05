@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, Mic, Minus, Play, Plus } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
 import {
-  Badge, CountUp, EmptyState, LoadingBlock, PageHeader, Panel, SectionTitle, Spinner,
+  Badge, CountUp, EmptyState, LoadingBlock, Notice, PageHeader, Panel, SectionTitle, Spinner,
 } from '../components/ui';
 import { api } from '../services/api';
 import { STORAGE_KEYS, readInterviewJourney } from '../utils/interviewJourney';
@@ -304,6 +304,57 @@ function InterviewRecording({ interviewId, parts, turns, playerRef }) {
   );
 }
 
+const INTEGRITY_LEVELS = {
+  clean: { label: 'Clean', tone: 'ok', text: 'No integrity issues were recorded.' },
+  minor: { label: 'Minor issues', tone: 'warn', text: 'A few events were recorded; review them below.' },
+  flagged: { label: 'Flagged', tone: 'bad', text: 'Repeated or serious integrity events were recorded.' },
+};
+
+// Proctoring summary: reported beside the score, never folded into it.
+function IntegrityPanel({ integrity, events, playerRef, i }) {
+  if (!integrity) return null;
+  const level = INTEGRITY_LEVELS[integrity.level] || INTEGRITY_LEVELS.minor;
+  const blocked = Object.entries(integrity.counts || {})
+    .filter(([type]) => !['fullscreen_exit', 'tab_hidden', 'window_blur'].includes(type))
+    .reduce((total, [, count]) => total + count, 0);
+  return (
+    <Panel i={i} className="p-6 sm:p-7">
+      <SectionTitle
+        title="Integrity"
+        description="Leaving the interview window, blocked actions and camera signals. Reported separately from the score."
+        action={<Badge tone={level.tone}>{level.label}</Badge>}
+      />
+      <p className="mt-2 text-[13px] text-ink-2">{level.text}</p>
+      <dl className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Figure label="Left the interview" value={`${integrity.violations ?? 0}×`} />
+        <Figure label="Time away" value={`${Math.round(integrity.time_away_seconds || 0)} s`} />
+        <Figure label="Blocked actions" value={blocked} />
+        <Figure label="Extra faces on camera" value={integrity.multiple_face_events ?? 0} />
+      </dl>
+      {events?.length > 0 && (
+        <ol className="mt-5 divide-y divide-line border-t border-line">
+          {events.map((event, index) => (
+            <li key={index} className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-[13px]">
+              <span className="flex items-center gap-2">
+                <span className={`h-1.5 w-1.5 rounded-full ${event.major ? 'bg-bad' : 'bg-warn'}`} />
+                <span className="text-ink">{event.label}</span>
+                {event.question_index && <span className="text-ink-3">· question {event.question_index}</span>}
+                {event.duration_seconds != null && event.major && <span className="text-ink-3">· {Math.round(event.duration_seconds)} s away</span>}
+              </span>
+              {playerRef && event.recording_part && event.at_seconds != null ? (
+                <button type="button" className="num font-mono text-xs text-ink-2 underline decoration-line-strong underline-offset-4 hover:text-ink"
+                  onClick={() => playerRef.current?.play(event.recording_part, Math.max(0, event.at_seconds - 3))}>
+                  {clock(event.at_seconds)}
+                </button>
+              ) : event.at_seconds != null && <span className="num font-mono text-xs text-ink-3">{clock(event.at_seconds)}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </Panel>
+  );
+}
+
 function TurnDetails({ turn, interviewId, playerRef }) {
   const criteria = turn.evaluation?.criteria_scores;
   const criteriaRows = CRITERIA.filter(([key]) => present(criteria?.[key]));
@@ -501,6 +552,12 @@ export default function Report() {
         )}
       />
 
+      {(report.ended_early || report.integrity?.ended_early) && (
+        <Notice tone="bad">
+          This interview ended early after the candidate repeatedly left the interview window. Unanswered questions were scored 0.
+        </Notice>
+      )}
+
       <Panel i={1} className="grid overflow-hidden md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         <div className="border-b border-line p-6 sm:p-8 md:border-b-0 md:border-r">
           <OverallScore score={report.overall_score ?? report.overallScore} />
@@ -529,6 +586,13 @@ export default function Report() {
           <DeliveryPanel speech={report.speech_metrics} vision={report.vision_metrics} i={3} />
         </section>
       )}
+
+      <IntegrityPanel
+        integrity={report.integrity}
+        events={report.proctoring_events}
+        playerRef={recordingParts.length > 0 ? playerRef : null}
+        i={3}
+      />
 
       {recordingParts.length > 0 && (
         <InterviewRecording interviewId={report.interview_id || interviewId} parts={recordingParts} turns={journey} playerRef={playerRef} />

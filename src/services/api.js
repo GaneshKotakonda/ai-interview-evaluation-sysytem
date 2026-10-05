@@ -208,14 +208,26 @@ export const api = {
 
   // 6. Standard only: aggregate saved evaluations into the final report.
   // `visionMetrics` may be {} when the camera model produced no data.
-  completeInterview(interviewId, visionMetrics = {}, durationSeconds = 0) {
+  // `endedEarly`: proctoring ended the interview; unanswered turns score 0.
+  completeInterview(interviewId, visionMetrics = {}, durationSeconds = 0, endedEarly = false) {
     const safeDuration = Number.isFinite(durationSeconds)
       ? Math.max(0, Math.round(durationSeconds))
       : 0;
     return request(interviewPath(interviewId, 'complete'), {
       method: 'POST',
-      json: { vision_metrics: visionMetrics, duration_seconds: safeDuration },
+      json: {
+        vision_metrics: visionMetrics,
+        duration_seconds: safeDuration,
+        ...(endedEarly ? { ended_early: true } : {}),
+      },
     }, 'Failed to complete evaluation');
+  },
+
+  // 6b. Proctoring: integrity events (leaving the interview, blocked actions).
+  // `events`: [{ id, type, question_index, part, at, duration, details }].
+  reportProctoringEvents(interviewId, events) {
+    return request(interviewPath(interviewId, 'proctoring'), { method: 'POST', json: { events } },
+      'Failed to record integrity event');
   },
 
   // 7. Saved Standard report, including every turn of the adaptive journey.

@@ -217,3 +217,22 @@ describe('voice interview API', () => {
     expect(fetch.mock.calls[3][0]).toBe('http://localhost:8000/api/interviews/iv/recording/2');
   });
 });
+
+describe('proctoring API', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reports integrity events and completes early only when asked', async () => {
+    const { api } = await import('./api');
+    await api.reportProctoringEvents('iv', [{ id: 'e1', type: 'window_blur' }]);
+    expect(fetch.mock.calls[0][0]).toBe('http://localhost:8000/api/interviews/iv/proctoring');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ events: [{ id: 'e1', type: 'window_blur' }] });
+    await api.completeInterview('iv', {}, 60, true);
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ ended_early: true, duration_seconds: 60 });
+    await api.completeInterview('iv', {}, 60);
+    expect(JSON.parse(fetch.mock.calls[2][1].body)).not.toHaveProperty('ended_early');
+  });
+});

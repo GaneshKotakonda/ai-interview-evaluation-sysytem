@@ -94,6 +94,10 @@ PIPER_VOICE_DIR = _env_str("PIPER_VOICE_DIR", os.path.join(BACKEND_DIR, "voices"
 PIPER_LENGTH_SCALE = float(_env_str("PIPER_LENGTH_SCALE", "1.05"))
 TTS_CACHE_DIR = _env_str("TTS_CACHE_DIR", os.path.join(BACKEND_DIR, "tts_cache"))
 
+# Proctoring: leaving the interview (fullscreen exit, tab switch, another
+# window or app) this many times ends the interview automatically.
+PROCTORING_MAX_VIOLATIONS = _env_int("PROCTORING_MAX_VIOLATIONS", 5)
+
 # Whole-interview recording, uploaded in chunks while the interview runs.
 MAX_SESSION_RECORDING_MB = _env_int("MAX_SESSION_RECORDING_MB", 800)
 

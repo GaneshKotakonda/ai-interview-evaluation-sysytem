@@ -104,10 +104,10 @@ class AdaptiveTests(unittest.TestCase):
                     fields = ("interview_id", "answer_quality_score", "communication_score",
                               "voice_confidence_score", "speech_fluency_score", "camera_engagement_score", "overall_score",
                               "vision_metrics", "nlp_metrics", "strengths", "improvements", "summary_feedback",
-                              "criteria_scores", "speech_metrics", "scoring_version", "scoring_weights")
+                              "criteria_scores", "speech_metrics", "scoring_version", "scoring_weights", "integrity")
                     self.saved_report = dict(zip(fields, params))
                     # psycopg2 returns JSONB columns as Python objects.
-                    for key in ("vision_metrics", "nlp_metrics", "criteria_scores", "speech_metrics", "scoring_weights"):
+                    for key in ("vision_metrics", "nlp_metrics", "criteria_scores", "speech_metrics", "scoring_weights", "integrity"):
                         if isinstance(self.saved_report.get(key), str):
                             self.saved_report[key] = json.loads(self.saved_report[key])
                 if "SET status = 'completed'" in query:

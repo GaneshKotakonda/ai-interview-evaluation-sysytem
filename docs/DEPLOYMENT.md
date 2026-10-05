@@ -1,6 +1,19 @@
 # Deployment Plan
 
-How and where to run the AI Interview Evaluation System in production.
+How and where to run the AI Interview Evaluation System in production. Status: **ready to deploy, not deployed yet.**
+
+## Release scope
+
+### Version 1 (this release)
+- Adaptive Standard interview, spoken end to end: Piper reads every question, the candidate answers out loud (typed mode for accessibility), faster-whisper transcribes, Gemini grades each answer silently on four criteria, and one holistic review writes the final summary.
+- Whole-interview recording with chunked upload, resume after reload, and playback in the report.
+- Proctoring: fullscreen enforcement, detection of leaving the interview (tab, window or app), blocked copy/paste/right-click and inspection shortcuts, second-display check, camera signals (extra faces, out of frame); automatic end after the configured number of violations; integrity section in the report.
+- Interview Arena, history, reports, profile, Firebase sign-in with server-side token checks.
+
+### Version 2 (planned): coding round with VPL
+- A coding round of programming questions in the interview, built on **VPL (Virtual Programming Lab)**: an in-browser code editor plus sandboxed compilation, execution and automatic test-case grading (the VPL Jail server).
+- Integration plan: generate coding tasks and hidden test cases from the role and job description; run submissions in the isolated VPL execution server, never on the API server; combine test results with the AI review of code quality into the report.
+- Stronger lockdown for the coding round: VPL works with **Safe Exam Browser**, which can block other applications at the operating-system level (beyond what a web page can detect).
 
 ## 1. Recommended setup
 
@@ -10,7 +23,7 @@ flowchart LR
   U -->|Firebase Auth| A[Firebase Authentication]
   U -->|HTTPS + ID token| C[Caddy<br/>automatic TLS]
   subgraph VM[One Linux server · Docker Compose]
-    C --> API[FastAPI + faster-whisper]
+    C --> API[FastAPI + faster-whisper + Piper]
     API --> DB[(PostgreSQL 16)]
     API --> V[(uploads volume<br/>answer recordings)]
   end
@@ -95,11 +108,13 @@ Firebase console → Authentication → Settings → **Authorised domains**: `ai
 
 ### F. Smoke test (about 10 minutes)
 1. Sign up, then sign in on the deployed site.
-2. Run a Standard interview: record one answer, wait for the transcript, edit it, submit, finish all turns.
-3. Open the report: criteria, delivery, camera summary and **Play recording** all work.
-4. Play an Arena session to the Boss Round.
-5. Reload the page in the middle of an interview: it resumes.
-6. `docker compose logs api` shows no errors.
+2. Readiness: the mic meter moves, **Test speakers** plays the interviewer voice, consent and continue.
+3. Run a Standard interview by voice: each question is spoken, answers end with **Next Question** or a pause, and the interview finishes with the closing message.
+4. Proctoring: during an interview press Alt+Tab (or switch tab) and confirm the "You left the interview" warning, then return; in a second interview repeat until the limit ends it.
+5. Open the report: criteria, delivery, camera summary, **Integrity** section, and the interview recording with "Play this answer".
+6. Reload the page in the middle of an interview: it resumes.
+7. Play an Arena session to the Boss Round.
+8. `docker compose logs api` shows no errors.
 
 ## 4. Updating
 ```bash
@@ -111,10 +126,15 @@ docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d 
 Frontend: `npm run build && firebase deploy --only hosting`.
 
 ## 5. Backups and retention
-- **Database, nightly:** add a cron job on the server:
-  `0 2 * * * cd ~/ai-interview-evaluation-sysytem/deploy && docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > ~/backups/db-$(date +\%F).sql.gz`
-  Keep about 14 days; copy them off the server weekly, or enable the provider's volume snapshots.
-- **Recordings:** they live in the `uploads` volume and are deleted when a user deletes an interview. To cap disk use, delete recordings older than N days, for example `docker compose exec api find backend/uploads -type f -mtime +60 -delete`.
+**Database, nightly.** Add this cron job on the server (`crontab -e`). Keep about 14 days of dumps, copy them off the server weekly, or enable the provider's volume snapshots.
+```bash
+0 2 * * * cd ~/ai-interview-evaluation-sysytem/deploy && docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > ~/backups/db-$(date +\%F).sql.gz
+```
+
+**Recordings.** They live in the `uploads` volume and are deleted when a user deletes an interview. To cap disk use, delete recordings older than N days:
+```bash
+docker compose exec api find backend/uploads -type f -mtime +60 -delete
+```
 
 ## 6. Monitoring
 - `docker compose ps` should show all services `healthy` or `running`. The API container has a health check against `/api/health`.

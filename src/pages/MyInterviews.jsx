@@ -39,6 +39,7 @@ const SORTS = {
 };
 
 function StatusBadge({ interview }) {
+  if (interview.ended_early) return <Badge tone="bad">Ended early</Badge>;
   return isCompleted(interview)
     ? <Badge tone="ok">Completed</Badge>
     : <Badge tone="warn">Incomplete</Badge>;

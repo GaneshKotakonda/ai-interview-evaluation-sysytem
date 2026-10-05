@@ -12,6 +12,7 @@ export const STORAGE_KEYS = {
   jobDescription: 'target-job-description',
   arenaInterviewId: 'arena-interview-id',     // sessionStorage: last Arena UUID
   answerMode: 'interview-answer-mode',        // 'voice' (default) or 'typed', chosen on Readiness
+  endedEarly: 'interview-ended-early',        // '1' when proctoring ended the interview
 };
 
 // How the candidate answers: spoken (default) or typed (accessibility /
@@ -22,7 +23,7 @@ export function readAnswerMode() {
 
 // Forget everything about the previous Standard interview.
 export function clearInterviewProgress() {
-  [STORAGE_KEYS.progress, STORAGE_KEYS.duration, STORAGE_KEYS.visionMetrics].forEach((key) =>
+  [STORAGE_KEYS.progress, STORAGE_KEYS.duration, STORAGE_KEYS.visionMetrics, STORAGE_KEYS.endedEarly].forEach((key) =>
     localStorage.removeItem(key));
 }
 

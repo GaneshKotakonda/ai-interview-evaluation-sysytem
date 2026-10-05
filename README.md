@@ -8,6 +8,7 @@ IntervueAI is an interview-coaching platform that evaluates each response before
 - **Dynamic Difficulty:** Deterministic transitions across Easy, Medium, Hard, and Expert.
 - **AI Follow-ups:** A partial answer can produce one contextual follow-up; consecutive follow-ups are blocked.
 - **Voice Interview:** One click starts the interview. Questions are read aloud by an open-source neural voice ([Piper](https://github.com/OHF-Voice/piper1-gpl)); the candidate answers out loud; the interview moves on after Next or a natural pause; the whole session is recorded. Scores stay hidden until the final report. A typed mode remains for accessibility.
+- **Proctoring:** The interview runs in fullscreen. Leaving it (another tab, window or app) shows a blocking warning and is recorded with its duration; copy, paste, right-click and inspection shortcuts are blocked; a second display is flagged; camera signals add extra-face and out-of-frame events. After the configured number of violations (default 5) the interview ends and unanswered questions score 0. The report has an Integrity section with a timeline linked to the recording.
 - **Speech-to-Text:** Answers are transcribed on the server with open-source [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT), primed with the question for technical vocabulary and filtered for silence hallucinations.
 - **Multi-criteria Evaluation:** Gemini + RAG score correctness, completeness, technical depth and relevance; answer quality is their documented weighted mean.
 - **Speech Delivery:** Pace (words per minute), filler words per minute and long pauses measured from Whisper word timestamps.
@@ -151,13 +152,14 @@ Follow-up controls prevent more than one consecutive follow-up. Arena XP, streak
 - When the camera model produces no data, Camera Engagement is omitted and the overall score is re-weighted over the other components; no value is assumed.
 - Every API call except `/api/health` must carry the signed-in user's Firebase ID token (`Authorization: Bearer …`); the backend verifies it against Google's signing certificates and only lets users read or change their own interviews and account. Uploaded answer videos are stored on the server's disk and are not served over HTTP.
 - A reload resumes an active Standard interview (the recording continues as a new part); an Arena game in progress cannot be resumed (its results reload once finished).
+- Proctoring detects leaving the interview window, not applications running in the background or a second device such as a phone; a web page cannot see those. Integrity is reported beside the score, not mixed into it. Operating-system lockdown (Safe Exam Browser) is planned for version 2.
 - Voice mode needs a reasonably quiet room: background conversation can be transcribed as part of an answer. Readiness measures room noise and the report flags answers that look unrelated to the question.
 - Piper is GPL-3.0 licensed; running it on our own server is fine, but redistributing a modified Piper would require sharing that source.
 - The system supports coaching and self-practice, not hiring decisions.
 
 ## Future Work
 
-Potential extensions include acoustic (tone/pitch) analysis, resume-driven interviews, a skill knowledge graph, Arena session recovery, coding challenges, and GPU-accelerated transcription for larger deployments.
+**Version 2:** a coding round with VPL (Virtual Programming Lab): in-browser editor, sandboxed execution and test-case grading, with Safe Exam Browser lockdown. Other extensions include acoustic (tone/pitch) analysis, resume-driven interviews, a skill knowledge graph, Arena session recovery, coding challenges, and GPU-accelerated transcription for larger deployments.
 
 ## Project Structure
 
@@ -174,6 +176,7 @@ backend/
   nlp_evaluator.py     filler words and rubric retrieval
   stt_service.py       speech-to-text (faster-whisper, Gemini fallback)
   tts_service.py       spoken questions (Piper neural voice, cached)
+  integrity.py         proctoring event rules and integrity summary
   speech_analysis.py   pace, filler and pause metrics
   gemini_service.py    Gemini and embedding integration
   database.py          PostgreSQL connections

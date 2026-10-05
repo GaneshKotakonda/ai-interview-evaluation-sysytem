@@ -360,7 +360,7 @@ export default function Readiness() {
                 className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
               />
               <span className="text-[13px] leading-relaxed text-ink-2">
-                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed for observable camera engagement.
+                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed, and to integrity monitoring: the interview runs in fullscreen, and leaving it to use other tabs, windows or apps is recorded.
               </span>
             </label>
             <button onClick={handleContinue} disabled={!canContinue} className="primary-btn mt-5 w-full !py-3">

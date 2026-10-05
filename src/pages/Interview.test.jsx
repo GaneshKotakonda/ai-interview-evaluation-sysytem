@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Interview from './Interview';
 
-const { api, navigate, speech, monitor, session, answerRecording } = vi.hoisted(() => ({
+const { api, navigate, speech, monitor, session, answerRecording, proctor } = vi.hoisted(() => ({
   api: {
     startInterview: vi.fn(), submitAnswer: vi.fn(), nextQuestion: vi.fn(),
-    transcribeAnswer: vi.fn(), getInterviewState: vi.fn(),
+    transcribeAnswer: vi.fn(), getInterviewState: vi.fn(), reportProctoringEvents: vi.fn(),
   },
+  proctor: { callbacks: null, enterFullscreen: vi.fn(), exitFullscreen: vi.fn(), check: vi.fn(), stop: vi.fn(), away: false },
   navigate: vi.fn(),
   speech: { speak: vi.fn(), stopSpeaking: vi.fn(), playTurnChime: vi.fn() },
   monitor: { snapshot: vi.fn(), reset: vi.fn(), stop: vi.fn() },
@@ -21,6 +22,16 @@ vi.mock('../services/speech', () => speech);
 vi.mock('../services/voiceActivity', () => ({ createVoiceMonitor: () => monitor }));
 vi.mock('../services/sessionRecorder', () => ({ startSessionRecording: () => session }));
 vi.mock('../services/answerRecorder', () => ({ startAnswerRecording: () => answerRecording }));
+vi.mock('../services/proctoring', () => ({
+  enterFullscreen: (...args) => proctor.enterFullscreen(...args),
+  exitFullscreen: (...args) => proctor.exitFullscreen(...args),
+  fullscreenSupported: () => true,
+  hasMultipleDisplays: () => false,
+  startProctoring: (callbacks) => {
+    proctor.callbacks = callbacks;
+    return { check: proctor.check, stop: proctor.stop, isAway: () => proctor.away };
+  },
+}));
 vi.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'user-1', email: 'c@x.com', displayName: 'Candidate' } }) }));
 vi.mock('react-router-dom', async (original) => ({ ...await original(), useNavigate: () => navigate }));
 vi.mock('../components/BehaviorMonitor', () => ({ default: () => <div>Behavior monitor</div> }));
@@ -36,6 +47,7 @@ beforeEach(() => {
     getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }], getVideoTracks: () => [{}], getAudioTracks: () => [{}] }),
   } });
   vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(); // not implemented by jsdom
+  window.focus = vi.fn(); // not implemented by jsdom
   speech.speak.mockResolvedValue();
   monitor.snapshot.mockReturnValue(quiet);
   session.elapsedSeconds.mockReturnValue(12);
@@ -45,6 +57,11 @@ beforeEach(() => {
   api.transcribeAnswer.mockResolvedValue({ transcript: 'Use resources and HTTP verbs.' });
   api.submitAnswer.mockResolvedValue({ response_id: 'response-1', evaluation: { answer_quality_score: 90 } });
   api.nextQuestion.mockResolvedValue({ next_question: next, current_turn: 2, max_turns: 2, is_complete: false });
+  api.reportProctoringEvents.mockResolvedValue({});
+  proctor.enterFullscreen.mockResolvedValue(true);
+  proctor.exitFullscreen.mockResolvedValue();
+  proctor.away = false;
+  proctor.callbacks = null;
 });
 afterEach(cleanup);
 
@@ -188,4 +205,52 @@ it('offers a retry when the interview cannot start', async () => {
   renderInterview();
   fireEvent.click(await screen.findByRole('button', { name: 'Retry Start' }));
   await screen.findByRole('button', { name: 'Start Interview' });
+});
+
+// ---------------------------------------------------------------
+// Proctoring
+// ---------------------------------------------------------------
+function leave(type = 'window_blur') {
+  proctor.away = true;
+  act(() => proctor.callbacks.onLeave({ id: `e-${Math.random()}`, type, types: new Set([type]), question_index: 1, part: 1, at: 30 }));
+}
+
+it('enters fullscreen on start and shows a warning when the candidate leaves', async () => {
+  await startAndListen();
+  expect(proctor.enterFullscreen).toHaveBeenCalled();
+  leave('window_blur');
+  expect(await screen.findByRole('alertdialog', { name: 'You left the interview' })).toBeInTheDocument();
+  expect(screen.getByText('Warning 1 of 5')).toBeInTheDocument();
+  await waitFor(() => expect(api.reportProctoringEvents).toHaveBeenCalledWith('session-1', [
+    expect.objectContaining({ type: 'window_blur', question_index: 1, part: 1, at: 30, details: { types: ['window_blur'] } }),
+  ]));
+  fireEvent.click(screen.getByRole('button', { name: 'Return to the interview' }));
+  await waitFor(() => expect(proctor.check).toHaveBeenCalled());
+  expect(proctor.enterFullscreen).toHaveBeenCalledTimes(2);
+  proctor.away = false;
+  act(() => proctor.callbacks.onReturn({ id: 'e-back', type: 'window_blur', types: ['window_blur'], duration: 4.2 }));
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+});
+
+it('does not move on by silence while the candidate is away', async () => {
+  await startAndListen();
+  leave('tab_hidden');
+  monitor.snapshot.mockReturnValue({ ...quiet, speaking: false, speechMs: 3000, silenceMs: 9000, elapsedMs: 12000 });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  expect(api.transcribeAnswer).not.toHaveBeenCalled();
+});
+
+it('ends the interview at the violation limit and completes it early', async () => {
+  api.startInterview.mockResolvedValue({ interview_id: 'session-1', question: first, current_turn: 1, max_turns: 2, proctoring: { max_violations: 2 } });
+  await startAndListen();
+  leave('window_blur');
+  proctor.away = false;
+  act(() => proctor.callbacks.onReturn({ id: 'x', type: 'window_blur', types: ['window_blur'], duration: 2 }));
+  leave('fullscreen_exit');
+  expect(await screen.findByRole('heading', { name: 'Interview ended' })).toBeInTheDocument();
+  expect(localStorage.getItem('interview-ended-early')).toBe('1');
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith('/interview-complete'), { timeout: 4000 });
+  expect(session.stop).toHaveBeenCalled();
+  expect(proctor.exitFullscreen).toHaveBeenCalled();
+  expect(api.submitAnswer).not.toHaveBeenCalled();
 });

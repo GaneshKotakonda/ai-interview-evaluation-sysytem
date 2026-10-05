@@ -191,7 +191,7 @@ class InterviewApiTests(unittest.TestCase):
         update_call = next(call for call in cursor.calls if "UPDATE interviews" in call[0])
         self.assertIn("status = 'completed'", update_call[0])
         self.assertIn("duration_seconds = %s", update_call[0])
-        self.assertEqual(update_call[1], (result["overall_score"], 420, INTERVIEW_ID))
+        self.assertEqual(update_call[1], (result["overall_score"], 420, False, None, INTERVIEW_ID))
         self.assertTrue(connection.committed)
 
 

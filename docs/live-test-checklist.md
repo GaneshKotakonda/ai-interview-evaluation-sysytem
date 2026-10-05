@@ -14,3 +14,4 @@ These checks are manual and are not implied by automated tests.
 - Confirm camera UI uses observable language only and does not make psychological claims.
 - Complete an Arena: setup topic display, one hint, XP, streak, hint penalty, difficulty, sixth-turn Boss Round, results, and browser refresh of results.
 - Test failed answer submission and failed advancement separately; confirm retries do not duplicate responses or XP.
+- Proctoring: Start Interview enters fullscreen; Esc, Alt+Tab, switching tab and clicking another window each show "You left the interview" with the warning count, and "Return to the interview" restores fullscreen. Paste in typed mode is blocked. At the limit the interview ends, the completion page says "Interview ended early", and the report shows the Integrity section and timeline.
