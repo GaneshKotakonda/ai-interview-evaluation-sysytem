@@ -68,3 +68,14 @@ it('sends no invented camera value when the vision model produced no data', asyn
   await waitFor(() => expect(completeInterview).toHaveBeenCalledWith('interview-id', {}, 0));
   expect(screen.getByText(/Not measured/)).toBeInTheDocument();
 });
+
+it('completes early when proctoring ended the interview', async () => {
+  localStorage.clear();
+  localStorage.setItem('current-interview-id', 'interview-id');
+  localStorage.setItem('interview-ended-early', 'away');
+  completeInterview.mockResolvedValue({ overall_score: 30, nlp_metrics: { total_fillers: 0 } });
+  render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><InterviewComplete /></MemoryRouter>);
+  expect(screen.getByRole('heading', { name: 'Interview ended early' })).toBeInTheDocument();
+  expect(screen.getByText(/stayed outside the interview/)).toBeInTheDocument();
+  await waitFor(() => expect(completeInterview).toHaveBeenCalledWith('interview-id', {}, 0, true, 'away'));
+});

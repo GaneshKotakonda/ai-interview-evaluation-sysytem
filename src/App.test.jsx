@@ -25,5 +25,7 @@ it('opens Arena in the authenticated layout with working navigation', async () =
   expect(screen.getByRole('link', { name: 'Interview Arena' })).toHaveAttribute('aria-current', 'page');
   fireEvent.click(screen.getByRole('button', { name: 'Start Arena Challenge' }));
   expect(screen.getByTestId('location')).toHaveTextContent('/arena/play');
-  expect(await screen.findByText('Level 1')).toBeInTheDocument();
+  // Ranked play opens on its own start screen, without the sidebar (focus mode).
+  expect(await screen.findByRole('button', { name: /Start Ranked Arena/ })).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Interview Arena' })).not.toBeInTheDocument();
 });

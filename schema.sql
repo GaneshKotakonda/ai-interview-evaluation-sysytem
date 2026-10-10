@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS interview_responses (
 
 -- 4b. Adaptive interview metadata
 -- Additive migrations preserve legacy sessions/responses.
+-- Resume text uploaded for this interview (tailors the questions).
+ALTER TABLE interviews ADD COLUMN IF NOT EXISTS resume_text TEXT;
+
 ALTER TABLE interviews
     ADD COLUMN IF NOT EXISTS current_difficulty VARCHAR(10) NOT NULL DEFAULT 'medium'
         CHECK (current_difficulty IN ('easy', 'medium', 'hard', 'expert')),
@@ -198,7 +201,157 @@ CREATE TABLE IF NOT EXISTS arena_turns (
     game_result JSONB NOT NULL CHECK (jsonb_typeof(game_result) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- 8. Indexes for the hot lookups
+-- 8. Speech-to-text, multi-criteria grading and per-answer vision
+-- A transcript is produced before the answer is submitted (the candidate
+-- reviews and may edit it), so it lives in its own table keyed by turn.
+-- Re-recording an answer replaces the row.
+CREATE TABLE IF NOT EXISTS answer_transcripts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    question_index INT NOT NULL CHECK (question_index >= 1),
+    transcript TEXT NOT NULL,
+    words JSONB NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(words) = 'array'),
+    speech_metrics JSONB,
+    source VARCHAR(20) NOT NULL,
+    model VARCHAR(60),
+    language VARCHAR(12),
+    duration_seconds FLOAT,
+    audio_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (interview_id, question_index)
+);
+
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS transcript TEXT,
+    ADD COLUMN IF NOT EXISTS transcript_source VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS speech_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS criteria_scores JSONB,
+    ADD COLUMN IF NOT EXISTS vision_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS audio_path TEXT;
+
+-- Scoring v2: every report records the formula version and the weights
+-- actually applied, so older reports remain explainable.
+ALTER TABLE evaluation_reports
+    ADD COLUMN IF NOT EXISTS criteria_scores JSONB,
+    ADD COLUMN IF NOT EXISTS speech_metrics JSONB,
+    ADD COLUMN IF NOT EXISTS scoring_version INT,
+    ADD COLUMN IF NOT EXISTS scoring_weights JSONB;
+
+-- 8b. Voice interviews: the whole interview is recorded in one or more
+-- parts (a new part starts after a reload); each answer stores where it
+-- sits in that recording. answer_mode records how answers were given.
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS answer_mode VARCHAR(10) NOT NULL DEFAULT 'typed'
+        CHECK (answer_mode IN ('voice', 'typed'));
+
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS recording_part INT CHECK (recording_part >= 1),
+    ADD COLUMN IF NOT EXISTS answer_start_seconds FLOAT CHECK (answer_start_seconds >= 0),
+    ADD COLUMN IF NOT EXISTS answer_end_seconds FLOAT CHECK (answer_end_seconds >= 0);
+
+-- 8c. Proctoring (interview integrity). One row per episode of leaving the
+-- interview (fullscreen exit / tab switch / other window) or blocked
+-- action. client_event_id makes browser retries idempotent.
+CREATE TABLE IF NOT EXISTS proctoring_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    client_event_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(30) NOT NULL,
+    question_index INT,
+    recording_part INT,
+    at_seconds FLOAT CHECK (at_seconds >= 0),
+    duration_seconds FLOAT CHECK (duration_seconds >= 0),
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (interview_id, client_event_id)
+);
+CREATE INDEX IF NOT EXISTS proctoring_events_interview_idx ON proctoring_events(interview_id);
+
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS ended_early BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS end_reason VARCHAR(30);
+
+ALTER TABLE evaluation_reports
+    ADD COLUMN IF NOT EXISTS integrity JSONB;
+
+-- 8d. Identity verification and malpractice evidence. The enrolment holds
+-- voice and face embeddings (lists of floats), not raw biometrics; photos
+-- and snapshots are owner-only files under backend/uploads/<id>/identity.
+CREATE TABLE IF NOT EXISTS identity_profiles (
+    interview_id UUID PRIMARY KEY REFERENCES interviews(id) ON DELETE CASCADE,
+    voice_embeddings JSONB NOT NULL DEFAULT '[]',
+    face_embeddings JSONB NOT NULL DEFAULT '[]',
+    voice_seconds FLOAT,
+    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One row per face snapshot or spoken-answer voice check.
+CREATE TABLE IF NOT EXISTS identity_checks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    interview_id UUID NOT NULL REFERENCES interviews(id) ON DELETE CASCADE,
+    kind VARCHAR(10) NOT NULL CHECK (kind IN ('face', 'voice')),
+    question_index INT,
+    recording_part INT,
+    at_seconds FLOAT CHECK (at_seconds >= 0),
+    verdict VARCHAR(20) NOT NULL,
+    similarity FLOAT,
+    faces INT,
+    image_name VARCHAR(80),
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS identity_checks_interview_idx ON identity_checks(interview_id, created_at);
+
+-- Browser signals per answer (latency, gaze, lip movement, typing), the
+-- content-style judgement from grading, and the integrity assessment.
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS answer_signals JSONB,
+    ADD COLUMN IF NOT EXISTS content_signals JSONB,
+    ADD COLUMN IF NOT EXISTS integrity JSONB;
+
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS integrity_verdict VARCHAR(20);
+
+-- 8e. Coding round (VPL). A coding turn stores the public problem (statement,
+-- examples, starter code) and, privately, where its hidden tests come from.
+ALTER TABLE interview_questions
+    ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'spoken',
+    ADD COLUMN IF NOT EXISTS coding JSONB,
+    ADD COLUMN IF NOT EXISTS coding_private JSONB;
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS coding_result JSONB;
+ALTER TABLE interviews
+    ADD COLUMN IF NOT EXISTS coding_round BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS arena_category VARCHAR(30);
+
+-- 8f. Arena ranking: one rating per user and category ('overall' included),
+-- and the history of every change (one row per category per session).
+ALTER TABLE arena_stats
+    ADD COLUMN IF NOT EXISTS integrity JSONB;
+CREATE TABLE IF NOT EXISTS user_ratings (
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category VARCHAR(30) NOT NULL,
+    rating INT NOT NULL DEFAULT 1500,
+    games INT NOT NULL DEFAULT 0,
+    best_rating INT NOT NULL DEFAULT 1500,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, category)
+);
+CREATE INDEX IF NOT EXISTS user_ratings_board_idx ON user_ratings(category, rating DESC);
+CREATE TABLE IF NOT EXISTS rating_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    interview_id UUID REFERENCES interviews(id) ON DELETE SET NULL,
+    category VARCHAR(30) NOT NULL,
+    change INT NOT NULL,
+    rating_after INT NOT NULL,
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (interview_id, category)
+);
+CREATE INDEX IF NOT EXISTS rating_events_user_idx ON rating_events(user_id, created_at DESC);
+
+-- 9. Indexes for the hot lookups
 CREATE INDEX IF NOT EXISTS arena_turns_interview_idx ON arena_turns(interview_id);
 CREATE INDEX IF NOT EXISTS question_rubrics_lookup_idx ON question_rubrics(interview_id, question_index);
 CREATE INDEX IF NOT EXISTS interviews_user_created_idx ON interviews(user_id, created_at DESC);

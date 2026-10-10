@@ -7,6 +7,29 @@ google-genai>=1.20
 python-dotenv>=1.0
 python-multipart>=0.0.9
 pydantic>=2.7
+# Firebase ID-token verification (auth.py)
+google-auth>=2.30
+cryptography>=42
+requests>=2.31
+
+# Speech-to-text (stt_service.py): faster-whisper is open source (MIT) and
+# runs locally. PyAV 16+ removed an argument faster-whisper 1.2 still uses.
+faster-whisper>=1.2,<2
+av>=11,<16
+
+# Text-to-speech (tts_service.py): Piper neural voices, run locally.
+# Licence GPL-3.0 (fine for a hosted service; see docs/DEPLOYMENT.md).
+piper-tts>=1.3,<2
+
+# Identity verification (identity.py): speaker embeddings (sherpa-onnx) and
+# face detection/recognition (OpenCV YuNet + SFace). Models are fetched by
+# backend/download_models.py. OpenCV 5 changed its DNN engine; 4.x is verified.
+sherpa-onnx>=1.12
+opencv-python-headless>=4.10,<5
+numpy>=1.26
+
+# Resume upload (resume.py): PDF text extraction. DOCX and TXT need nothing extra.
+pypdf>=5
 
 # Tests (python -m pytest backend)
 pytest>=8.0

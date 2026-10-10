@@ -55,3 +55,12 @@ Login → Dashboard → Camera/Mic Check → Interview → Audio/Video Capture �
 Important: everyone should work in a separate Git branch and make PRs instead of directly changing `main`.
 
 Let's focus on making the **actual AI evaluation work**, because the current repo already has most of the frontend interview workflow but the real AI analysis is still missing.
+
+---
+
+**Update (5 October 2026):** the remaining work was completed in one stream instead of being split by person; see `docs/DEVELOPMENT_PLAN.md` for what was built. Agreed technical decisions:
+
+* **Database:** PostgreSQL (kept instead of Firestore).
+* **Speech-to-text:** faster-whisper (open source, runs on our server), with Gemini transcription as a fallback.
+* **Recordings:** stored on the server and served only to their owner through an authenticated API endpoint (no Firebase Storage needed).
+* **Deployment:** Firebase Hosting for the frontend and one Docker Compose server for the API and database; see `docs/DEPLOYMENT.md`.

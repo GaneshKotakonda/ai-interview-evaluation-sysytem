@@ -1,6 +1,6 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LoaderCircle } from 'lucide-react';
+import { BrandMark, Spinner } from './ui';
 
 // -------------------------------------------------------------
 // Route guard: shows a loader while Firebase restores the session, then
@@ -14,10 +14,11 @@ export default function ProtectedRoute() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div className="flex items-center gap-3 text-sm font-medium text-slate-600">
-          <LoaderCircle className="h-5 w-5 animate-spin text-navy-700" />
-          Loading your workspace...
+      <div className="fade-in flex min-h-screen flex-col items-center justify-center gap-4 bg-paper">
+        <BrandMark className="h-10 w-10" />
+        <div className="flex items-center gap-2 text-sm text-ink-3">
+          <Spinner />
+          Loading your workspace…
         </div>
       </div>
     );

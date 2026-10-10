@@ -1,0 +1,106 @@
+# Production stack for one Linux server: API + PostgreSQL + Caddy (HTTPS)
+# + the isolated VPL code runner.
+# Run from the deploy/ folder:  docker compose up -d --build
+# Settings come from deploy/.env (copy .env.example and fill it in).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-interviews}
+      POSTGRES_USER: ${POSTGRES_USER:-interview}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Applied automatically on the first start (empty database). Later
+      # migrations: see docs/DEPLOYMENT.md ("Updating").
+      - ../schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published: only the API can reach the database.
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        STT_MODEL: ${STT_MODEL:-base.en}
+        PIPER_VOICE: ${PIPER_VOICE:-en_US-lessac-medium}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-interview}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-interviews}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-ai-evaluation-40c8a}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS in deploy/.env}
+      STT_PROVIDER: ${STT_PROVIDER:-whisper}
+      STT_MODEL: ${STT_MODEL:-base.en}
+      TTS_PROVIDER: ${TTS_PROVIDER:-piper}
+      PIPER_VOICE: ${PIPER_VOICE:-en_US-lessac-medium}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MAX_SESSION_RECORDING_MB: ${MAX_SESSION_RECORDING_MB:-800}
+      PROCTORING_MAX_VIOLATIONS: ${PROCTORING_MAX_VIOLATIONS:-3}
+      PROCTORING_MAX_AWAY_SECONDS: ${PROCTORING_MAX_AWAY_SECONDS:-5}
+      IDENTITY_CHECKS: ${IDENTITY_CHECKS:-on}
+      CODE_RUNNER_URL: http://runner:8080
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in deploy/.env}
+    networks: [default, runner]
+    volumes:
+      - uploads:/app/backend/uploads
+      - tts_cache:/app/backend/tts_cache
+    expose:
+      - "8000"
+
+  # Candidates' code runs here, never in the API container. No internet
+  # (internal network only), read-only filesystem, small writable /tmp,
+  # no Linux capabilities, and CPU / memory / process limits.
+  runner:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.runner
+    restart: unless-stopped
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in deploy/.env}
+    networks: [runner]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,exec
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+networks:
+  runner:
+    internal: true   # no route to the internet
+
+volumes:
+  pgdata:
+  uploads:
+  tts_cache:
+  caddy_data:
+  caddy_config:

@@ -7,6 +7,11 @@ import json
 
 from fastapi import HTTPException
 
+import assessment
+import integrity
+import malpractice
+import ranking
+
 DIFFICULTIES = ('easy', 'medium', 'hard', 'expert')
 
 # Tunable game constants.
@@ -123,6 +128,43 @@ def use_hint(cur, interview, turn):
 
 
 # -------------------------------------------------------------
+# BLOCK 3b: Ranked finish (integrity penalties + rating)
+# -------------------------------------------------------------
+def finalize(cur, interview, end_reason=None):
+    """Close a ranked Arena: integrity assessment, final score, rating change.
+
+    ``end_reason``: None (all levels played), "away" (stayed outside the
+    interview too long) or "violations" (warning limit reached). Unplayed
+    levels score 0. Idempotent through ranking.apply_session.
+    """
+    interview_id = str(interview['id'])
+    cur.execute('SELECT * FROM interview_responses WHERE interview_id=%s AND evaluated_at IS NOT NULL '
+                'ORDER BY question_index;', (interview_id,))
+    responses = cur.fetchall()
+    assessments, identity_summary = assessment.assess(cur, interview_id, responses)
+    adjusted = assessment.store(cur, responses, assessments)
+    scores = list(adjusted.values()) + [0] * max(0, interview['max_turns'] - len(responses))
+    score = sum(scores) / len(scores) if scores else 0
+
+    cur.execute('SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id=%s;', (interview_id,))
+    summary = integrity.summarize(cur.fetchall(), None, bool(end_reason))
+    decision = malpractice.verdict(list(assessments.values()), identity_summary['face_mismatch_events'],
+                                   summary['level'], len(responses))
+    summary.update(decision, identity=identity_summary, end_reason=end_reason)
+    final = 0 if decision['verdict'] == 'invalid' else round(score)
+    cur.execute('''UPDATE interviews SET status='completed', completed_at=COALESCE(completed_at, NOW()),
+                   duration_seconds=GREATEST(0, EXTRACT(EPOCH FROM (NOW()-created_at))::integer),
+                   overall_score=%s, ended_early=%s, end_reason=%s, integrity_verdict=%s WHERE id=%s;''',
+                (final, bool(end_reason), end_reason, decision['verdict'], interview_id))
+    cur.execute('UPDATE arena_stats SET integrity=%s, updated_at=NOW() WHERE interview_id=%s;',
+                (json.dumps(summary), interview_id))
+    ratings = ranking.apply_session(
+        cur, interview, score=score, difficulties=[r['difficulty'] for r in responses] or ['easy'],
+        violations=summary['violations'], end_reason=end_reason, verdict=decision['verdict'])
+    return {'ratings': ratings, 'integrity': summary, 'final_score': final}
+
+
+# -------------------------------------------------------------
 # BLOCK 4: Final results summary
 # -------------------------------------------------------------
 def results(cur, interview):
@@ -139,6 +181,10 @@ def results(cur, interview):
                    FROM arena_turns t JOIN interview_responses r ON r.id=t.response_id
                    WHERE t.interview_id=%s ORDER BY r.question_index;''', (str(interview['id']),))
     turns = cur.fetchall()
+    cur.execute('SELECT category, change, rating_after, details FROM rating_events WHERE interview_id=%s;',
+                (str(interview['id']),))
+    events = cur.fetchall()
+    ratings = ranking.summary(cur, interview['user_id'], events) if events else None
 
     # Average score per topic, best first.
     by_topic = {}
@@ -152,4 +198,7 @@ def results(cur, interview):
                 total_xp=stats['total_xp'], best_streak=stats['best_streak'], highest_difficulty=stats['highest_difficulty'],
                 boss_score=stats['boss_score'], questions_completed=len(turns),
                 average_score=round(sum(t['answer_quality_score'] for t in turns) / len(turns), 1) if turns else 0,
-                strongest_areas=topics[:2], practice_areas=list(reversed(topics))[:2], turns=turns)
+                strongest_areas=topics[:2], practice_areas=list(reversed(topics))[:2], turns=turns,
+                ratings=ratings, integrity=stats.get('integrity'), category=interview.get('arena_category'),
+                ended_early=bool(interview.get('ended_early')), end_reason=interview.get('end_reason'),
+                final_score=interview.get('overall_score'))

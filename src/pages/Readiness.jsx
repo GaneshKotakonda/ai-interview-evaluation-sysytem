@@ -1,21 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ArrowRight,
+  AudioLines,
   Camera,
-  Lightbulb,
+  FileText,
+  Keyboard,
   Mic,
   RefreshCw,
+  Volume2,
   Wifi,
-  ArrowRight,
-  Briefcase,
-  FileText,
-  Sparkles,
+  X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
-import { STORAGE_KEYS, clearInterviewProgress } from '../utils/interviewJourney';
+import { Badge, FlowSteps, Notice, PageHeader, Panel, SectionTitle } from '../components/ui';
+import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
+import { api } from '../services/api';
+import { speak } from '../services/speech';
+import { NOISY_FLOOR, createVoiceMonitor } from '../services/voiceActivity';
 
 // The backend stores role titles in a VARCHAR(100) column.
 const ROLE_TITLE_MAX = 100;
+
+// Same idea as the server's coding.suggests_coding: roles that write code.
+const CODING_WORDS = ['software', 'developer', 'engineer', 'programm', 'coding', 'algorithm', 'data structure', 'dsa',
+  'python', 'java', 'javascript', 'typescript', 'c++', 'backend', 'back-end', 'full stack', 'fullstack', 'frontend',
+  'front-end', 'react', 'node', 'leetcode'];
+export const suggestsCoding = (text) => CODING_WORDS.some((word) => (text || '').toLowerCase().includes(word));
 const JOB_DESCRIPTION_MAX = 4000; // the backend uses at most 4000 characters
 
 // -------------------------------------------------------------
@@ -62,6 +73,14 @@ export default function Readiness() {
   const [consent, setConsent] = useState(false);
   const [checking, setChecking] = useState(true);
   const [permissionError, setPermissionError] = useState('');
+  // Spoken (default) or typed answers; the room/speaker checks below.
+  const [answerMode, setAnswerMode] = useState(() => readAnswerMode());
+  // Coding round (VPL): suggested from the role until the candidate decides.
+  const [codingChoice, setCodingChoice] = useState(null);
+  const [micLevel, setMicLevel] = useState(0);
+  const [roomNoise, setRoomNoise] = useState('measuring'); // measuring | quiet | noisy
+  const [speakerState, setSpeakerState] = useState('idle'); // idle | playing | done
+  const monitorRef = useRef(null);
 
   // -------------------------------------------------------------
   // BLOCK 3: Target Role & Job Description Configuration State
@@ -73,12 +92,37 @@ export default function Readiness() {
   const [jobDescription, setJobDescription] = useState(
     () => localStorage.getItem(STORAGE_KEYS.jobDescription) || ''
   );
+  // Resume: parsed by the server; its text is kept here and sent when the interview starts.
+  const [resume, setResume] = useState(() => {
+    const text = localStorage.getItem(STORAGE_KEYS.resumeText) || '';
+    return text ? { name: localStorage.getItem(STORAGE_KEYS.resumeName) || 'Saved resume', text } : null;
+  });
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeError, setResumeError] = useState('');
+
+  const handleResumeFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setResumeBusy(true);
+    setResumeError('');
+    try {
+      const parsed = await api.parseResume(file);
+      setResume({ name: parsed.filename || file.name, text: parsed.resume_text });
+    } catch (err) {
+      setResumeError(err.detail || 'The resume could not be read. Upload a text-based PDF, DOCX or TXT file under 2 MB.');
+    } finally {
+      setResumeBusy(false);
+    }
+  };
 
   // -------------------------------------------------------------
   // BLOCK 4: Hardware Permission & Device Check Handlers
   // -------------------------------------------------------------
   // Stops any running camera tracks cleanly.
   const stopStream = () => {
+    monitorRef.current?.stop();
+    monitorRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   };
@@ -110,7 +154,9 @@ export default function Readiness() {
     }
 
     try {
-      const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       const audioTracks = microphoneStream.getAudioTracks();
       tracks.push(...audioTracks);
       setMicrophoneReady(audioTracks.length > 0);
@@ -126,6 +172,32 @@ export default function Readiness() {
 
     if (errors.length > 0) setPermissionError(errors.join(' · '));
     setChecking(false);
+
+    // Live microphone meter and a 3-second background-noise check.
+    setRoomNoise('measuring');
+    if (streamRef.current?.getAudioTracks().length) {
+      monitorRef.current = createVoiceMonitor(streamRef.current);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const snapshot = monitorRef.current?.snapshot();
+      if (!snapshot) return;
+      setMicLevel(snapshot.level);
+      if (snapshot.elapsedMs > 3000) {
+        setRoomNoise((current) => (current === 'measuring'
+          ? (snapshot.noiseFloor > NOISY_FLOOR ? 'noisy' : 'quiet') : current));
+      }
+    }, 150);
+    return () => clearInterval(timer);
+  }, []);
+
+  const testSpeakers = async () => {
+    setSpeakerState('playing');
+    await speak({ phrase: 'speaker_test' },
+      'This is a speaker test. If you can hear this clearly, your audio is ready for the interview.');
+    setSpeakerState('done');
   };
 
   useEffect(() => {
@@ -146,7 +218,9 @@ export default function Readiness() {
   // BLOCK 5: Navigation & Target Specification Persistence
   // -------------------------------------------------------------
   // Validates device checks and stores customized Role & JD to localStorage.
-  const canContinue = cameraReady && microphoneReady && networkReady && consent;
+  const voiceMode = answerMode === 'voice';
+  const codingRound = codingChoice ?? suggestsCoding(`${roleTitle} ${jobDescription}`);
+  const canContinue = cameraReady && (microphoneReady || !voiceMode) && networkReady && consent;
 
   const handleContinue = () => {
     if (!canContinue) return;
@@ -155,6 +229,15 @@ export default function Readiness() {
     // Persist target role and custom job description for Interview.jsx
     localStorage.setItem(STORAGE_KEYS.roleTitle, roleTitle.trim() || 'Software Engineer');
     localStorage.setItem(STORAGE_KEYS.jobDescription, jobDescription.trim());
+    if (resume) {
+      localStorage.setItem(STORAGE_KEYS.resumeText, resume.text);
+      localStorage.setItem(STORAGE_KEYS.resumeName, resume.name);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.resumeText);
+      localStorage.removeItem(STORAGE_KEYS.resumeName);
+    }
+    localStorage.setItem(STORAGE_KEYS.answerMode, answerMode);
+    localStorage.setItem(STORAGE_KEYS.codingRound, codingRound ? 'on' : 'off');
 
     // Reset previous interview progress so fresh questions generate
     clearInterviewProgress();
@@ -172,207 +255,209 @@ export default function Readiness() {
   // -------------------------------------------------------------
   // BLOCK 6: Render Component UI
   // -------------------------------------------------------------
+  const checks = [
+    { icon: Camera, label: 'Camera', status: cameraReady ? 'Ready' : 'Permission Required', ready: cameraReady, helper: 'Video input for engagement tracking' },
+    { icon: Mic, label: 'Microphone', status: microphoneReady ? 'Ready' : 'Permission Required', ready: microphoneReady, helper: 'Speak to see the level move' },
+    { icon: AudioLines, label: 'Room noise', status: { measuring: 'Measuring…', quiet: 'Quiet', noisy: 'Noisy' }[roomNoise], ready: roomNoise === 'quiet', helper: roomNoise === 'noisy' ? 'Background speech may be transcribed' : 'Background sound level' },
+    { icon: Wifi, label: 'Network', status: networkReady ? 'Connected' : 'Offline', ready: networkReady, helper: 'Browser network connection' },
+  ];
+  const readyCount = checks.filter((check) => check.ready).length;
+
   return (
-    <div className="mx-auto max-w-6xl space-y-7">
-      {/* Header Banner */}
-      <div>
-        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-tealish-600">
-          Interview Preparation
-        </p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">
-          Customize Your Interview & Check Readiness
-        </h1>
-        <p className="mt-2 text-slate-500">
-          Configure the target job role, paste job description requirements, and verify your camera and mic setup.
-        </p>
-      </div>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <FlowSteps current={0} />
+      <PageHeader
+        title="Set up your interview"
+        description="Tell us the role you are preparing for, then check your camera and microphone. Questions adapt to this role as you answer."
+      />
 
-      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="space-y-6">
-          {/* Target Role & Job Description Configuration Card */}
-          <section className="card p-6 sm:p-7">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-5">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl bg-tealish-50 p-2.5 text-tealish-600">
-                  <Briefcase className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="font-bold text-slate-900">Target Role & Job Description</h2>
-                  <p className="text-xs text-slate-500">
-                    Gemini will generate adaptive questions for this role and its stated requirements.
-                  </p>
-                </div>
-              </div>
-              {jobDescription.trim() && (
-                <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 sm:inline-flex">
-                  <Sparkles className="h-3.5 w-3.5" /> JD Tailored
-                </span>
-              )}
-            </div>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+        {/* Target role and job description */}
+        <Panel i={1} className="p-6 sm:p-7">
+          <SectionTitle
+            title="Target role"
+            description="Gemini writes each question for this role and the requirements you paste."
+            action={(jobDescription.trim() || resume) && <Badge tone="ink">{resume ? 'Tailored to resume' : 'Tailored to JD'}</Badge>}
+          />
 
-            <div className="mt-6 space-y-5">
-              {/* Role Title Input */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600">
-                  Target Job Title
-                </label>
-                <input
-                  type="text"
-                  maxLength={ROLE_TITLE_MAX}
-                  value={roleTitle}
-                  onChange={(e) => setRoleTitle(e.target.value)}
-                  placeholder="e.g. Full Stack Developer, Data Scientist, DevOps Specialist"
-                  className="input-field mt-2"
-                />
-              </div>
-
-              {/* Quick Template Presets */}
-              <div>
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Quick Role Templates:
-                </span>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {JOB_PRESETS.map((preset) => (
+          <div className="mt-7 space-y-7">
+            <div>
+              <label htmlFor="role-title" className="field-label">Job title</label>
+              <input
+                id="role-title"
+                type="text"
+                maxLength={ROLE_TITLE_MAX}
+                value={roleTitle}
+                onChange={(e) => setRoleTitle(e.target.value)}
+                placeholder="e.g. Full Stack Developer, Data Scientist"
+                className="input-field !py-3 !text-base"
+              />
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="mr-1 text-xs text-ink-3">Templates</span>
+                {JOB_PRESETS.map((preset) => {
+                  const active = roleTitle === preset.role;
+                  return (
                     <button
                       key={preset.label}
                       type="button"
                       onClick={() => applyPreset(preset)}
-                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                        roleTitle === preset.role
-                          ? 'border-navy-800 bg-navy-900 text-white shadow-sm'
-                          : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100'
+                      aria-pressed={active}
+                      className={`rounded-full border px-3 py-1 text-[13px] transition duration-200 ${
+                        active
+                          ? 'border-ink bg-ink text-paper'
+                          : 'border-line-strong text-ink-2 hover:border-ink-3 hover:text-ink'
                       }`}
                     >
                       {preset.label}
                     </button>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
+            </div>
 
-              {/* Job Description Textarea */}
-              <div>
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-600">
-                    <FileText className="h-4 w-4 text-slate-400" />
-                    Job Description & Responsibilities (Optional)
-                  </label>
-                  <span className="text-xs text-slate-400">{jobDescription.length} characters</span>
+            <div>
+              <div className="flex items-baseline justify-between">
+                <label htmlFor="job-description" className="field-label">
+                  Job description <span className="font-normal text-ink-3">(optional)</span>
+                </label>
+                <span className="num font-mono text-xs text-ink-4">{jobDescription.length} / {JOB_DESCRIPTION_MAX}</span>
+              </div>
+              <textarea
+                id="job-description"
+                rows="9"
+                maxLength={JOB_DESCRIPTION_MAX}
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+                placeholder="Paste the responsibilities, required stack or key qualifications. Questions will target these requirements."
+                className="input-field resize-y leading-relaxed"
+              />
+              <p className="mt-2 text-xs text-ink-3">Leave blank to use a standard rubric for the job title.</p>
+            </div>
+
+            <div>
+              <label htmlFor="resume-file" className="field-label">
+                Resume <span className="font-normal text-ink-3">(optional)</span>
+              </label>
+              {resume ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-3">
+                  <span className="flex min-w-0 items-center gap-2 text-sm text-ink">
+                    <FileText className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                    <span className="truncate">{resume.name}</span>
+                  </span>
+                  <button type="button" onClick={() => setResume(null)} className="secondary-btn !px-3 !py-1.5 text-xs" aria-label="Remove resume">
+                    <X className="h-3.5 w-3.5" /> Remove
+                  </button>
                 </div>
-                <textarea
-                  rows="4"
-                  maxLength={JOB_DESCRIPTION_MAX}
-                  value={jobDescription}
-                  onChange={(e) => setJobDescription(e.target.value)}
-                  placeholder="Paste the job description, required technologies, framework stack, or key qualifications here... AI will formulate interview questions tailored to these exact requirements."
-                  className="input-field mt-2 resize-y leading-6"
+              ) : (
+                <input
+                  id="resume-file"
+                  type="file"
+                  accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                  onChange={handleResumeFile}
+                  disabled={resumeBusy}
+                  className="input-field file:mr-3 file:rounded-md file:border-0 file:bg-sunken file:px-3 file:py-1.5 file:text-sm"
                 />
-                <p className="mt-1.5 text-xs text-slate-400">
-                  Leave blank to use the standard industry rubric for the selected job title.
-                </p>
-              </div>
-            </div>
-          </section>
-
-          {/* Camera Video Preview Card */}
-          <section className="card overflow-hidden">
-            <div className="border-b border-slate-100 px-6 py-5">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-bold text-slate-900">Camera Preview</h2>
-                  <p className="mt-1 text-sm text-slate-500">Your video remains private and local to your browser.</p>
-                </div>
-                <button onClick={runDeviceCheck} disabled={checking} className="secondary-btn !px-3 !py-2">
-                  <RefreshCw className={`h-4 w-4 ${checking ? 'animate-spin' : ''}`} /> Recheck
-                </button>
-              </div>
-            </div>
-            <div className="bg-slate-950 p-3 sm:p-5">
-              <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">
-                <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-                {!cameraReady && (
-                  <div className="absolute inset-0 grid place-items-center p-6 text-center text-slate-300">
-                    <div>
-                      <Camera className="mx-auto h-8 w-8" />
-                      <p className="mt-3 text-sm">
-                        {checking ? 'Verifying camera access...' : 'Camera preview unavailable'}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            {permissionError && (
-              <div className="border-t border-amber-200 bg-amber-50 px-6 py-4 text-sm text-amber-800">
-                {permissionError}
-              </div>
-            )}
-          </section>
-        </div>
-
-        {/* Right Aside: Readiness Verification & Start Button */}
-        <section className="space-y-4">
-          <div className="card p-5">
-            <h2 className="font-bold text-slate-900">Readiness Checks</h2>
-            <p className="mt-1 text-sm text-slate-500">All required inputs must be verified before continuing.</p>
-            <div className="mt-5 space-y-3">
-              <DeviceCheck
-                icon={Camera}
-                label="Camera"
-                status={cameraReady ? 'Ready' : 'Permission Required'}
-                ready={cameraReady}
-                helper="Video input for interview tracking"
-              />
-              <DeviceCheck
-                icon={Mic}
-                label="Microphone"
-                status={microphoneReady ? 'Ready' : 'Permission Required'}
-                ready={microphoneReady}
-                helper="Audio input for spoken answers"
-              />
-              <DeviceCheck
-                icon={Wifi}
-                label="Network"
-                status={networkReady ? 'Connected' : 'Offline'}
-                ready={networkReady}
-                helper="Browser network connection"
-              />
-              <DeviceCheck
-                icon={Lightbulb}
-                label="Environment"
-                status={cameraReady ? 'Good' : 'Waiting'}
-                ready={cameraReady}
-                helper="Adequate face lighting"
-              />
+              )}
+              {resumeBusy && <p className="mt-2 text-xs text-ink-3">Reading your resume…</p>}
+              {resumeError && <Notice tone="warn" role="alert" className="mt-2">{resumeError}</Notice>}
+              <p className="mt-2 text-xs text-ink-3">
+                PDF, DOCX or TXT, up to 2 MB. Some questions will be based on your projects and skills. The text is saved with this interview only.
+              </p>
             </div>
           </div>
+        </Panel>
 
-          {/* Consent & Begin Button */}
-          <div className="card p-5">
-            <label className="flex cursor-pointer items-start gap-3">
+        {/* Pre-flight: preview, checks, consent */}
+        <div className="space-y-5 lg:sticky lg:top-24 lg:self-start">
+          <Panel i={2} className="overflow-hidden">
+            <div className="relative aspect-video bg-ink">
+              <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+              {!cameraReady && (
+                <div className="absolute inset-0 grid place-items-center p-6 text-center text-paper/60">
+                  <div>
+                    <Camera className="mx-auto h-6 w-6" strokeWidth={1.5} />
+                    <p className="mt-2 text-[13px]">{checking ? 'Checking camera access…' : 'Camera preview unavailable'}</p>
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={runDeviceCheck}
+                disabled={checking}
+                className="btn absolute right-3 top-3 bg-ink/60 !px-3 !py-1.5 text-xs text-paper backdrop-blur hover:bg-ink/80"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${checking ? 'animate-spin' : ''}`} /> Recheck
+              </button>
+            </div>
+            <div className="px-5 pb-2 pt-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[15px] font-semibold text-ink">Readiness checks</h2>
+                <span className="num font-mono text-xs text-ink-3">{readyCount}/{checks.length}</span>
+              </div>
+              <div className="mt-1 divide-y divide-line">
+                {checks.map((check) => <DeviceCheck key={check.label} {...check} />)}
+              </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-sunken" aria-label="Microphone level">
+                <div className="h-full rounded-full bg-ink transition-[width] duration-150" style={{ width: `${Math.round(micLevel * 100)}%` }} />
+              </div>
+              <button type="button" onClick={testSpeakers} disabled={speakerState === 'playing'} className="secondary-btn mt-4 w-full !py-2 text-[13px]">
+                <Volume2 className="h-4 w-4" />
+                {speakerState === 'playing' ? 'Playing test sound…' : speakerState === 'done' ? 'Play speaker test again' : 'Test speakers'}
+              </button>
+              <p className="mt-2 pb-2 text-center text-xs text-ink-3">Questions are read aloud through your current speakers or headphones.</p>
+            </div>
+            {permissionError && <div className="px-5 pb-4"><Notice tone="warn">{permissionError}</Notice></div>}
+          </Panel>
+
+          <Panel i={3} className="p-5">
+            <fieldset>
+              <legend className="text-[15px] font-semibold text-ink">How will you answer?</legend>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {[['voice', 'Speak', 'Recommended', Mic], ['typed', 'Type', 'No microphone', Keyboard]].map(([value, label, hint, Icon]) => (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer flex-col gap-1 rounded-control border px-3 py-2.5 transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ink ${
+                      answerMode === value ? 'border-ink bg-ink text-paper' : 'border-line hover:border-ink-4'
+                    }`}
+                  >
+                    <input type="radio" name="answer-mode" value={value} checked={answerMode === value} onChange={() => setAnswerMode(value)} className="sr-only" />
+                    <span className="flex items-center gap-2 text-sm font-medium"><Icon className="h-4 w-4" aria-hidden="true" />{label}</span>
+                    <span className={`text-xs ${answerMode === value ? 'text-paper/60' : 'text-ink-3'}`}>{hint}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <label className="mt-5 flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={codingRound}
+                onChange={(e) => setCodingChoice(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
+              />
+              <span className="text-[13px] leading-relaxed text-ink-2">
+                <span className="font-medium text-ink">Include a coding round.</span> Questions 2 and 4 open the built-in code editor (VPL) with test cases.
+              </span>
+            </label>
+            <label className="mt-4 flex cursor-pointer items-start gap-3">
               <input
                 type="checkbox"
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-300 text-navy-800 focus:ring-navy-600"
+                className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
               />
-              <span className="text-sm leading-6 text-slate-700">
-                I consent to audio, video, and observable camera-engagement analysis for this practice interview.
+              <span className="text-[13px] leading-relaxed text-ink-2">
+                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed, and to integrity monitoring: the interview runs in fullscreen and leaving it is recorded; a photo and a short voice sample are taken at the start and compared with the rest of the interview; other people, phones, other voices and reading a prepared answer are detected.
               </span>
             </label>
-            <button
-              onClick={handleContinue}
-              disabled={!canContinue}
-              className="primary-btn mt-5 w-full justify-center"
-            >
+            <button onClick={handleContinue} disabled={!canContinue} className="primary-btn mt-5 w-full !py-3">
               Continue to Interview <ArrowRight className="h-4 w-4" />
             </button>
             {!canContinue && (
-              <p className="mt-3 text-center text-xs text-slate-400">
-                Camera, microphone, network, and consent checkbox are required to start.
+              <p className="mt-3 text-center text-xs text-ink-3">
+                {voiceMode ? 'Camera, microphone, network and consent are required to start.' : 'Camera, network and consent are required to start.'}
               </p>
             )}
-          </div>
-        </section>
+          </Panel>
+        </div>
       </div>
     </div>
   );

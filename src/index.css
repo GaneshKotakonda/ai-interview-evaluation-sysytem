@@ -2,13 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* -------------------------------------------------------------
+   Base
+   ------------------------------------------------------------- */
 @layer base {
   :root {
-    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: #172033;
-    background: #f6f8fb;
+    font-family: Geist, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    color: #171611;
+    background: #f7f6f2;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'ss01', 'cv11';
   }
 
   * {
@@ -19,35 +24,185 @@
     margin: 0;
     min-width: 320px;
     min-height: 100vh;
-    background: #f6f8fb;
+    background: #f7f6f2;
   }
 
-  button:focus-visible, a:focus-visible {
-    outline: 3px solid #0d9488;
+  ::selection {
+    background: #171611;
+    color: #f7f6f2;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  [role='radio']:focus-visible,
+  input[type='checkbox']:focus-visible,
+  input[type='radio']:focus-visible {
+    outline: 2px solid #171611;
     outline-offset: 3px;
   }
 
   button,
   input,
-  textarea {
+  textarea,
+  select {
     font: inherit;
   }
 }
 
+/* -------------------------------------------------------------
+   Components
+   ------------------------------------------------------------- */
 @layer components {
   .card {
-    @apply rounded-2xl border border-slate-200 bg-white shadow-card;
+    @apply rounded-panel border border-line bg-surface shadow-panel;
   }
 
   .input-field {
-    @apply w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-navy-600 focus:ring-4 focus:ring-navy-100;
+    @apply w-full rounded-control border border-line-strong bg-surface px-3.5 py-2.5 text-sm text-ink outline-none transition duration-200 placeholder:text-ink-4 hover:border-ink-4 focus:border-ink focus:ring-4 focus:ring-ink/[0.06] disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-3;
+  }
+
+  .field-label {
+    @apply mb-1.5 block text-[13px] font-medium text-ink-2;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-control px-4 py-2.5 text-sm font-medium transition duration-200 ease-out active:scale-[0.98] disabled:pointer-events-none disabled:opacity-45;
   }
 
   .primary-btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-navy-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-navy-800 disabled:cursor-not-allowed disabled:bg-slate-300;
+    @apply btn bg-ink text-paper shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_2px_rgba(23,22,17,0.2)] hover:bg-[#2b2a23];
   }
 
   .secondary-btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply btn border border-line-strong bg-surface text-ink hover:border-ink-4 hover:bg-paper;
+  }
+
+  .ghost-btn {
+    @apply btn px-3 text-ink-2 hover:bg-sunken hover:text-ink;
+  }
+
+  .danger-btn {
+    @apply btn bg-bad text-white hover:bg-[#8a3128];
+  }
+
+  .link {
+    @apply font-medium text-ink underline decoration-line-strong underline-offset-4 transition hover:decoration-ink;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* -------------------------------------------------------------
+   Motion
+   ------------------------------------------------------------- */
+@layer utilities {
+  /* Staggered entrance: set style={{ '--i': n }} for the delay step. */
+  .reveal {
+    animation: rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 70ms);
+  }
+
+  .page-enter {
+    animation: rise 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .fade-in {
+    animation: fade 300ms ease-out both;
+  }
+
+  .scale-in {
+    animation: scale-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Meter fill grows from the left on mount. */
+  .grow-x {
+    transform-origin: left center;
+    animation: grow-x 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 90ms + 120ms);
+  }
+
+  .skeleton {
+    background: linear-gradient(90deg, #efede7 0%, #f7f6f2 50%, #efede7 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  .draw {
+    stroke-dasharray: var(--len, 100);
+    stroke-dashoffset: var(--len, 100);
+    animation: draw 700ms cubic-bezier(0.65, 0, 0.35, 1) forwards;
+    animation-delay: var(--delay, 0ms);
+  }
+
+  .float-up {
+    animation: float-up 1.1s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .wave-bar {
+    transform-origin: center;
+    animation: wave 1.6s ease-in-out infinite;
+    animation-delay: calc(var(--i, 0) * -120ms);
+  }
+
+  .pulse-dot {
+    animation: pulse-dot 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes grow-x {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@keyframes draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes float-up {
+  0% { opacity: 0; transform: translateY(6px); }
+  20% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-22px); }
+}
+
+@keyframes wave {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(161, 58, 48, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(161, 58, 48, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
   }
 }

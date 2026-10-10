@@ -33,6 +33,21 @@ it.each([['Play Again', 'Arena setup destination'], ['Try Standard Interview', '
   fireEvent.click(screen.getByRole('link', { name: action }));
   expect(screen.getByText(destination)).toBeInTheDocument();
 });
+it('shows the rating change, rank and integrity penalty', async () => {
+  getArenaResults.mockResolvedValueOnce({
+    interview_mode: 'game', total_xp: 100, best_streak: 0, average_score: 20, highest_difficulty: 'easy', boss_score: null,
+    questions_completed: 1, strongest_areas: [], practice_areas: [], turns: [], ended_early: true, end_reason: 'away',
+    ratings: {
+      overall: { label: 'Overall', rating: 1401, change: -99, rank: 7, total: 12, penalty: 65 },
+      dsa: { label: 'Data Structures & Algorithms', rating: 1401, change: -99, rank: 3, total: 4, penalty: 65 },
+    },
+  });
+  open();
+  expect(await screen.findByRole('heading', { name: 'Rating' })).toBeInTheDocument();
+  expect(screen.getAllByText('-99')).toHaveLength(2);
+  expect(screen.getByText(/Rank #7 of 12 · includes −65 integrity penalty/)).toBeInTheDocument();
+  expect(screen.getByText(/stayed outside it too long/)).toBeInTheDocument();
+});
 it('retries a failed result fetch without fabricated statistics', async () => {
   getArenaResults.mockRejectedValueOnce(new Error('offline'));
   open();

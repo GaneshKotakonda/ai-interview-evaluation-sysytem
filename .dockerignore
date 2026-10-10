@@ -1,0 +1,16 @@
+# Keep the backend image small and free of secrets.
+.git
+node_modules
+dist
+src
+docs
+.venv
+**/__pycache__
+**/.pytest_cache
+backend/uploads
+**/.env
+**/.env.*
+!**/.env.example
+*.png
+*.pdf
+*.log
