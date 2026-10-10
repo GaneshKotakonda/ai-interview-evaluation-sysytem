@@ -19,6 +19,17 @@ it('offers practice areas and passes the selected config to gameplay', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Start Arena Challenge' }));
   expect(JSON.parse(screen.getByTestId('config').textContent)).toMatchObject({ arenaConfig: { role_title: 'Frontend Developer', topic: 'React', interview_mode: 'game' } });
 });
+it('lists what the Arena is for and sends the ranking category and coding choice', () => {
+  open();
+  expect(screen.getByRole('heading', { name: 'What the Arena is for' })).toBeInTheDocument();
+  expect(screen.getByText('Category ranks')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('radio', { name: 'SQL / Database' }));
+  expect(screen.getByRole('checkbox', { name: /Include coding challenges/ })).not.toBeChecked();
+  fireEvent.click(screen.getByRole('radio', { name: 'Data Structures & Algorithms' }));
+  expect(screen.getByRole('checkbox', { name: /Include coding challenges/ })).toBeChecked();
+  fireEvent.click(screen.getByRole('button', { name: 'Start Arena Challenge' }));
+  expect(JSON.parse(screen.getByTestId('config').textContent).arenaConfig).toMatchObject({ category: 'dsa', coding: true });
+});
 it('requires a nonblank custom topic and preserves a custom description', () => {
   open();
   fireEvent.click(screen.getByRole('radio', { name: 'Custom Topic' }));

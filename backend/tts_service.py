@@ -138,6 +138,17 @@ PHRASES = {
     "thanks_next": "Thank you. Let's move on to the next question.",
     "no_speech": "Sorry, I couldn't hear an answer. Please try answering again.",
     "time_up": "Thank you, that's the time for this question.",
+    # Spoken before the identity check (see RULES in the frontend).
+    "rules": (
+        "Before we begin, here are the rules. You must be alone: no other person may be in the room, "
+        "speak, or help you. Do not use AI tools, websites, notes, a phone or any other device, and do not "
+        "read prepared answers. Stay on this screen in fullscreen. Switching to another tab, window or app "
+        f"is a warning, and staying away for {config.PROCTORING_MAX_AWAY_SECONDS} seconds ends the interview "
+        "immediately. Keep your face visible to the camera; your face and voice are checked throughout. "
+        "Do not copy, paste or use auto-typing tools. "
+        f"After {config.PROCTORING_MAX_VIOLATIONS} warnings the interview ends, and unanswered questions "
+        "score zero. In the Arena, every warning also lowers your rating. Select I understand to continue."
+    ),
 }
 
 

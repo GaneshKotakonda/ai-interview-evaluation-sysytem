@@ -3,21 +3,30 @@ import {
   ArrowRight,
   AudioLines,
   Camera,
+  FileText,
   Keyboard,
   Mic,
   RefreshCw,
   Volume2,
   Wifi,
+  X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
 import { Badge, FlowSteps, Notice, PageHeader, Panel, SectionTitle } from '../components/ui';
 import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
+import { api } from '../services/api';
 import { speak } from '../services/speech';
-import { createVoiceMonitor } from '../services/voiceActivity';
+import { NOISY_FLOOR, createVoiceMonitor } from '../services/voiceActivity';
 
 // The backend stores role titles in a VARCHAR(100) column.
 const ROLE_TITLE_MAX = 100;
+
+// Same idea as the server's coding.suggests_coding: roles that write code.
+const CODING_WORDS = ['software', 'developer', 'engineer', 'programm', 'coding', 'algorithm', 'data structure', 'dsa',
+  'python', 'java', 'javascript', 'typescript', 'c++', 'backend', 'back-end', 'full stack', 'fullstack', 'frontend',
+  'front-end', 'react', 'node', 'leetcode'];
+export const suggestsCoding = (text) => CODING_WORDS.some((word) => (text || '').toLowerCase().includes(word));
 const JOB_DESCRIPTION_MAX = 4000; // the backend uses at most 4000 characters
 
 // -------------------------------------------------------------
@@ -66,6 +75,8 @@ export default function Readiness() {
   const [permissionError, setPermissionError] = useState('');
   // Spoken (default) or typed answers; the room/speaker checks below.
   const [answerMode, setAnswerMode] = useState(() => readAnswerMode());
+  // Coding round (VPL): suggested from the role until the candidate decides.
+  const [codingChoice, setCodingChoice] = useState(null);
   const [micLevel, setMicLevel] = useState(0);
   const [roomNoise, setRoomNoise] = useState('measuring'); // measuring | quiet | noisy
   const [speakerState, setSpeakerState] = useState('idle'); // idle | playing | done
@@ -81,6 +92,29 @@ export default function Readiness() {
   const [jobDescription, setJobDescription] = useState(
     () => localStorage.getItem(STORAGE_KEYS.jobDescription) || ''
   );
+  // Resume: parsed by the server; its text is kept here and sent when the interview starts.
+  const [resume, setResume] = useState(() => {
+    const text = localStorage.getItem(STORAGE_KEYS.resumeText) || '';
+    return text ? { name: localStorage.getItem(STORAGE_KEYS.resumeName) || 'Saved resume', text } : null;
+  });
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeError, setResumeError] = useState('');
+
+  const handleResumeFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setResumeBusy(true);
+    setResumeError('');
+    try {
+      const parsed = await api.parseResume(file);
+      setResume({ name: parsed.filename || file.name, text: parsed.resume_text });
+    } catch (err) {
+      setResumeError(err.detail || 'The resume could not be read. Upload a text-based PDF, DOCX or TXT file under 2 MB.');
+    } finally {
+      setResumeBusy(false);
+    }
+  };
 
   // -------------------------------------------------------------
   // BLOCK 4: Hardware Permission & Device Check Handlers
@@ -153,7 +187,7 @@ export default function Readiness() {
       setMicLevel(snapshot.level);
       if (snapshot.elapsedMs > 3000) {
         setRoomNoise((current) => (current === 'measuring'
-          ? (snapshot.noiseFloor > 0.03 ? 'noisy' : 'quiet') : current));
+          ? (snapshot.noiseFloor > NOISY_FLOOR ? 'noisy' : 'quiet') : current));
       }
     }, 150);
     return () => clearInterval(timer);
@@ -185,6 +219,7 @@ export default function Readiness() {
   // -------------------------------------------------------------
   // Validates device checks and stores customized Role & JD to localStorage.
   const voiceMode = answerMode === 'voice';
+  const codingRound = codingChoice ?? suggestsCoding(`${roleTitle} ${jobDescription}`);
   const canContinue = cameraReady && (microphoneReady || !voiceMode) && networkReady && consent;
 
   const handleContinue = () => {
@@ -194,7 +229,15 @@ export default function Readiness() {
     // Persist target role and custom job description for Interview.jsx
     localStorage.setItem(STORAGE_KEYS.roleTitle, roleTitle.trim() || 'Software Engineer');
     localStorage.setItem(STORAGE_KEYS.jobDescription, jobDescription.trim());
+    if (resume) {
+      localStorage.setItem(STORAGE_KEYS.resumeText, resume.text);
+      localStorage.setItem(STORAGE_KEYS.resumeName, resume.name);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.resumeText);
+      localStorage.removeItem(STORAGE_KEYS.resumeName);
+    }
     localStorage.setItem(STORAGE_KEYS.answerMode, answerMode);
+    localStorage.setItem(STORAGE_KEYS.codingRound, codingRound ? 'on' : 'off');
 
     // Reset previous interview progress so fresh questions generate
     clearInterviewProgress();
@@ -234,7 +277,7 @@ export default function Readiness() {
           <SectionTitle
             title="Target role"
             description="Gemini writes each question for this role and the requirements you paste."
-            action={jobDescription.trim() && <Badge tone="ink">Tailored to JD</Badge>}
+            action={(jobDescription.trim() || resume) && <Badge tone="ink">{resume ? 'Tailored to resume' : 'Tailored to JD'}</Badge>}
           />
 
           <div className="mt-7 space-y-7">
@@ -289,6 +332,37 @@ export default function Readiness() {
                 className="input-field resize-y leading-relaxed"
               />
               <p className="mt-2 text-xs text-ink-3">Leave blank to use a standard rubric for the job title.</p>
+            </div>
+
+            <div>
+              <label htmlFor="resume-file" className="field-label">
+                Resume <span className="font-normal text-ink-3">(optional)</span>
+              </label>
+              {resume ? (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-3">
+                  <span className="flex min-w-0 items-center gap-2 text-sm text-ink">
+                    <FileText className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                    <span className="truncate">{resume.name}</span>
+                  </span>
+                  <button type="button" onClick={() => setResume(null)} className="secondary-btn !px-3 !py-1.5 text-xs" aria-label="Remove resume">
+                    <X className="h-3.5 w-3.5" /> Remove
+                  </button>
+                </div>
+              ) : (
+                <input
+                  id="resume-file"
+                  type="file"
+                  accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                  onChange={handleResumeFile}
+                  disabled={resumeBusy}
+                  className="input-field file:mr-3 file:rounded-md file:border-0 file:bg-sunken file:px-3 file:py-1.5 file:text-sm"
+                />
+              )}
+              {resumeBusy && <p className="mt-2 text-xs text-ink-3">Reading your resume…</p>}
+              {resumeError && <Notice tone="warn" role="alert" className="mt-2">{resumeError}</Notice>}
+              <p className="mt-2 text-xs text-ink-3">
+                PDF, DOCX or TXT, up to 2 MB. Some questions will be based on your projects and skills. The text is saved with this interview only.
+              </p>
             </div>
           </div>
         </Panel>
@@ -355,12 +429,23 @@ export default function Readiness() {
             <label className="mt-5 flex cursor-pointer items-start gap-3">
               <input
                 type="checkbox"
+                checked={codingRound}
+                onChange={(e) => setCodingChoice(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
+              />
+              <span className="text-[13px] leading-relaxed text-ink-2">
+                <span className="font-medium text-ink">Include a coding round.</span> Questions 2 and 4 open the built-in code editor (VPL) with test cases.
+              </span>
+            </label>
+            <label className="mt-4 flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
                 checked={consent}
                 onChange={(e) => setConsent(e.target.checked)}
                 className="mt-0.5 h-4 w-4 rounded border-line-strong accent-[#171611]"
               />
               <span className="text-[13px] leading-relaxed text-ink-2">
-                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed, and to integrity monitoring: the interview runs in fullscreen, and leaving it to use other tabs, windows or apps is recorded.
+                I consent to the whole interview being recorded (camera and microphone), transcribed and analysed, and to integrity monitoring: the interview runs in fullscreen and leaving it is recorded; a photo and a short voice sample are taken at the start and compared with the rest of the interview; other people, phones, other voices and reading a prepared answer are detected.
               </span>
             </label>
             <button onClick={handleContinue} disabled={!canContinue} className="primary-btn mt-5 w-full !py-3">

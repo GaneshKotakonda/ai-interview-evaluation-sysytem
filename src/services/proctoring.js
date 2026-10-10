@@ -120,6 +120,9 @@ export function startProctoring({ onLeave, onReturn, onMinor, context = () => ({
     /** Re-check after the candidate pressed "Return to the interview". */
     check: maybeReturn,
     isAway: () => Boolean(episode),
+    /** Outside the page right now (another tab, window or app), not just out of fullscreen. */
+    isOutside: () => document.visibilityState === 'hidden'
+      || (typeof document.hasFocus === 'function' && !document.hasFocus()),
     stop() {
       document.removeEventListener('fullscreenchange', handlers.fullscreenchange);
       document.removeEventListener('visibilitychange', handlers.visibilitychange);

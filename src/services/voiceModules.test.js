@@ -90,3 +90,43 @@ describe('speech', () => {
     expect(spoken).toEqual(['Browser voice test']);
   });
 });
+
+describe('speech detector', () => {
+  async function detector() {
+    const { createSpeechDetector } = await import('./voiceActivity');
+    const d = createSpeechDetector();
+    d.reset(0);
+    return d;
+  }
+  const feed = (d, level, fromMs, toMs) => { for (let t = fromMs; t < toMs; t += 50) d.push(level, t); };
+
+  it('detects speech over a quiet room and measures the silence after it', async () => {
+    const d = await detector();
+    feed(d, 0.0001, 0, 2000);
+    feed(d, 0.003, 2000, 4000);
+    expect(d.snapshot(4000).speaking).toBe(true);
+    feed(d, 0.0001, 4000, 7000);
+    const snap = d.snapshot(7000);
+    expect(snap.speaking).toBe(false);
+    expect(snap.speechMs).toBeGreaterThanOrEqual(1900);
+    expect(snap.silenceMs).toBeGreaterThan(2500);
+  });
+
+  it('learns a loud, steady room instead of treating it as endless speech', async () => {
+    const d = await detector();
+    feed(d, 0.002, 0, 8000); // fan noise louder than the starting guess
+    expect(d.snapshot(8000).speaking).toBe(false);
+    feed(d, 0.008, 8000, 9500); // speech clearly above that noise
+    expect(d.snapshot(9500).speaking).toBe(true);
+    feed(d, 0.002, 9500, 13000);
+    expect(d.snapshot(13000).silenceMs).toBeGreaterThan(3000);
+  });
+
+  it('ignores single clicks', async () => {
+    const d = await detector();
+    feed(d, 0.0001, 0, 2000);
+    d.push(0.01, 2000);
+    feed(d, 0.0001, 2050, 3000);
+    expect(d.snapshot(3000).speechMs).toBe(0);
+  });
+});

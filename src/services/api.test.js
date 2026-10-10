@@ -197,6 +197,18 @@ describe('voice interview API', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body)).not.toHaveProperty('answer_mode');
   });
 
+  it('sends the resume text only when there is one, and uploads resumes as multipart', async () => {
+    const { api } = await import('./api');
+    await api.startInterview('Role', 'uid', null, null, null, 5, 'standard', 'voice', { resumeText: 'Built APIs' });
+    expect(JSON.parse(fetch.mock.calls[0][1].body).resume_text).toBe('Built APIs');
+    await api.startInterview('Role', 'uid', null, null, null, 5, 'standard', 'voice');
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).not.toHaveProperty('resume_text');
+    await api.parseResume(new File(['hello'], 'cv.txt', { type: 'text/plain' }));
+    const [url, options] = fetch.mock.calls[2];
+    expect(url).toMatch(/\/api\/resume\/parse$/);
+    expect(options.body.get('file').name).toBe('cv.txt');
+  });
+
   it('sends the answer position in the session recording', async () => {
     const { api } = await import('./api');
     await api.submitAnswer('iv', { questionIndex: 1, questionText: 'Q', candidateAnswer: 'A', recording: { part: 2, start: 30.5, end: 75 } });

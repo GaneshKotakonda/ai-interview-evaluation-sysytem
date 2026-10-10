@@ -5,6 +5,7 @@ import {
   LayoutGrid,
   LogOut,
   Mic,
+  Trophy,
   UserRound,
   X,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ const groups = [
       { label: 'Dashboard', icon: LayoutGrid, to: '/dashboard' },
       { label: 'Start Interview', icon: Mic, to: '/readiness' },
       { label: 'Interview Arena', icon: Gamepad2, to: '/arena' },
+      { label: 'Leaderboard', icon: Trophy, to: '/arena/leaderboard' },
     ],
   },
   {

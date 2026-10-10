@@ -86,8 +86,62 @@ it('shows the integrity summary, event timeline and an ended-early notice', asyn
   expect(await screen.findByText('Integrity')).toBeInTheDocument();
   expect(screen.getByText('Flagged')).toBeInTheDocument();
   expect(screen.getByText('5×')).toBeInTheDocument();
-  expect(screen.getByText('63 s')).toBeInTheDocument();
+  expect(screen.getByText('5× · 63 s')).toBeInTheDocument();
   expect(screen.getByText('Switched to another window or app')).toBeInTheDocument();
-  expect(screen.getByText(/12 s away/)).toBeInTheDocument();
-  expect(screen.getByText(/ended early after the candidate repeatedly left/)).toBeInTheDocument();
+  expect(screen.getByText(/· 12 s/)).toBeInTheDocument();
+  expect(screen.getByText(/ended early after repeated integrity warnings/)).toBeInTheDocument();
+});
+
+it('shows the verdict, identity evidence and per-answer penalties', async () => {
+  const { api } = await import('../services/api');
+  api.getIdentityImageUrl = vi.fn().mockResolvedValue('blob:image');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'iv', overall_score: 0, role_title: 'Backend Engineer',
+    scores: [{ label: 'Answer Quality', value: 30 }],
+    integrity: {
+      level: 'flagged', verdict: 'invalid', violations: 3, counts: { voice_mismatch: 2, extra_person: 1 },
+      reasons: ['The candidate\'s identity could not be confirmed throughout the interview.'],
+      answers_zeroed: 2, answers_capped: 1, score_before_integrity: 71,
+      identity: { enrolled: true, voice_checks: { match: 3, mismatch: 2 }, face_checks: { match: 20, mismatch: 2 }, face_mismatch_events: 1 },
+    },
+    identity: { enrolled: true, photo: 'enroll.jpg', flagged_checks: [
+      { id: 'c1', kind: 'face', verdict: 'mismatch', recording_part: 1, at_seconds: 95, image_name: 'check_c1.jpg' },
+    ] },
+    proctoring_events: [],
+    turns: [{
+      index: 1, question: 'Explain indexes', evaluation: { answer_quality_score: 85 },
+      integrity: { action: 'zero', original_score: 85, adjusted_score: 0,
+        flags: [{ code: 'voice_mismatch', label: 'Answered in a voice that does not match the candidate', severity: 'zero' }] },
+    }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=iv']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  expect(await screen.findByText('Invalid')).toBeInTheDocument();
+  expect(screen.getByText(/This interview is invalid/)).toBeInTheDocument();
+  expect(screen.getByText('71')).toBeInTheDocument();
+  expect(screen.getByText(/Voice matched in 3 of 5 spoken answers/)).toBeInTheDocument();
+  expect(screen.getByText('Answered in a voice that does not match the candidate')).toBeInTheDocument();
+  expect(screen.getByText(/Scored 0: another person/)).toBeInTheDocument();
+  expect(screen.getByText('Technical score: 0/100')).toBeInTheDocument();
+  await waitFor(() => expect(api.getIdentityImageUrl).toHaveBeenCalledWith('iv', 'check_c1.jpg'));
+  expect(api.getIdentityImageUrl).toHaveBeenCalledWith('iv', 'enroll.jpg');
+  expect(await screen.findByAltText('Enrolment photo')).toHaveAttribute('src', 'blob:image');
+});
+it('shows completion, the insufficient-responses notice and Speech Fluency "—" when everything was skipped', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'skipped', overall_score: 0, role_title: 'Backend Engineer', insufficient_responses: true,
+    completion: { answered: 0, total: 5, skipped: 5, ratio: 0, rate_percent: 0 },
+    scores: [{ label: 'Answer Quality', value: 0 }, { label: 'Communication', value: 0 },
+      { label: 'Speech Fluency', value: null }, { label: 'Camera Engagement', value: 87 }],
+    criteria_scores: { correctness: 0, completeness: 0, technical_depth: 0, relevance: 0 },
+    turns: [{ index: 1, question: 'Explain REST', difficulty: 'medium', answer: 'skip',
+      evaluation: { answer_quality_score: 0, evaluation_source: 'skipped' } }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=skipped']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  expect(await screen.findByText('0 / 5')).toBeInTheDocument();
+  expect(screen.getByText(/Insufficient substantive responses were provided/)).toBeInTheDocument();
+  expect(screen.getByText('Speech Fluency').parentElement).toHaveTextContent('—');
+  expect(screen.getByText('Camera Engagement')).toBeInTheDocument();
+  expect(screen.queryByText('Answer criteria')).not.toBeInTheDocument();
+  expect(screen.getByText('Skipped')).toBeInTheDocument();
 });

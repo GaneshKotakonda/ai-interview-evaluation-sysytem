@@ -28,6 +28,20 @@ class IntegritySummaryTests(unittest.TestCase):
         self.assertEqual(integrity.summarize([], {"multipleFaceEvents": 2})["level"], "flagged")
         self.assertTrue(integrity.summarize([], ended_early=True)["ended_early"])
 
+    def test_gaze_warnings_are_reported_but_not_violations(self):
+        result = integrity.summarize([{"event_type": "looking_away"}] * 3)
+        self.assertEqual((result["violations"], result["gaze_warnings"], result["level"]), (0, 3, "clean"))
+        self.assertIn("looking_away", integrity.MINOR_EVENTS)
+        self.assertIn("looking_away", integrity.CLIENT_EVENT_TYPES)
+        self.assertNotIn("looking_away", integrity.MAJOR_EVENTS)
+
+    def test_background_sound_is_a_counted_malpractice_event_the_browser_may_send(self):
+        self.assertIn("background_sound", integrity.MALPRACTICE_EVENTS)
+        self.assertIn("background_sound", integrity.CLIENT_EVENT_TYPES)
+        self.assertTrue(integrity.is_major(["background_sound"]))
+        result = integrity.summarize([{"event_type": "background_sound", "duration_seconds": 12}])
+        self.assertEqual((result["violations"], result["malpractice_events"]), (1, 1))
+
     def test_only_leaving_the_interview_counts_as_a_violation(self):
         self.assertTrue(integrity.is_major(["window_blur", "tab_hidden"]))
         self.assertFalse(integrity.is_major(["copy_blocked", "multiple_displays"]))
@@ -53,11 +67,12 @@ class ProctoringEndpointTests(unittest.TestCase):
         self.assertEqual(inserts[0][1][1:7], ("e1", "window_blur", 2, 1, 42.5, 3))
         self.assertEqual(result, {"stored": 1, "violations": 1, "max_violations": main.config.PROCTORING_MAX_VIOLATIONS})
 
-    def test_arena_and_finished_interviews_are_refused(self):
-        for interview in ({**ACTIVE, "interview_mode": "game"}, {**ACTIVE, "status": "completed"}):
-            with self.subTest(interview=interview), self.assertRaises(HTTPException) as ctx:
-                self._post([{"id": "e", "type": "window_blur"}], interview)
-            self.assertEqual(ctx.exception.status_code, 409)
+    def test_finished_interviews_are_refused_and_arena_is_proctored(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self._post([{"id": "e", "type": "window_blur"}], {**ACTIVE, "status": "completed"})
+        self.assertEqual(ctx.exception.status_code, 409)
+        result, _ = self._post([{"id": "e", "type": "window_blur"}], {**ACTIVE, "interview_mode": "game"})
+        self.assertEqual(result["stored"], 1)
 
 
 class EarlyTerminationTests(unittest.TestCase):
@@ -74,21 +89,26 @@ class EarlyTerminationTests(unittest.TestCase):
         return result, cursor
 
     def test_unanswered_questions_score_zero_and_interview_is_marked(self):
-        answered = [{"question_id": f"q{i}", "question_index": i, "question_text": "Q", "candidate_answer": "A",
+        answered = [{"id": f"r{i}", "question_id": f"q{i}", "question_index": i, "question_text": "Q", "candidate_answer": "A",
                      "answer_quality_score": 90, "communication_score": 80, "evaluated_at": "now",
                      "criteria_scores": None, "strengths": [], "improvements": []} for i in (1, 2)]
         result, cursor = self._complete(answered)
-        self.assertEqual(result["scores"][0], {"label": "Answer Quality", "value": 36})  # (90+90)/5
+        # Averaged over the 2 answered questions; the overall score is scaled by 2/5.
+        self.assertEqual(result["scores"][0], {"label": "Answer Quality", "value": 90})
+        self.assertEqual(result["completion"]["answered"], 2)
+        self.assertEqual(result["overall_score"], 36)  # weighted 89 (no camera) x 2/5
         self.assertTrue(result["integrity"]["ended_early"])
         self.assertEqual(result["integrity"]["level"], "flagged")
         self.assertTrue(result["feedback"].startswith("This interview ended early"))
         update = next(c for c in cursor.calls if "UPDATE interviews" in c[0])
-        self.assertEqual(update[1][2:4], (True, "integrity"))
+        self.assertEqual(update[1][2:4], (True, "violations"))
 
     def test_ending_before_any_answer_still_produces_a_report(self):
         result, _ = self._complete([])
         self.assertEqual(result["overall_score"], 0)
-        self.assertNotIn("Speech Fluency", [s["label"] for s in result["scores"]])
+        speech = next(s for s in result["scores"] if s["label"] == "Speech Fluency")
+        self.assertIsNone(speech["value"])
+        self.assertTrue(result["insufficient_responses"])
 
     def test_without_ended_early_all_turns_are_still_required(self):
         class Cursor(FakeCursor):

@@ -56,6 +56,43 @@ def count_filler_words(text: str) -> dict:
 
 
 # -------------------------------------------------------------
+# BLOCK 2b: Non-answer detection ("skip", "I don't know", filler only)
+# -------------------------------------------------------------
+NON_ANSWER_PHRASES = {
+    "skip", "pass", "next", "next question", "skip this", "skip this question",
+    "i don't know", "i dont know", "don't know", "dont know", "idk",
+    "no idea", "no", "nothing", "no answer", "not sure", "i'm not sure", "im not sure",
+}
+MAX_NON_ANSWER_WORDS = 5
+_EDGE_PUNCTUATION = " \t\r\n.,!?;:…-–—\"'`()[]"
+_SINGLE_FILLERS = [w for w in COMMON_FILLER_WORDS if " " not in w and w not in ("like", "actually", "basically", "literally")]
+_FILLER_ONLY = re.compile(r"\b(?:" + "|".join(map(re.escape, _SINGLE_FILLERS)) + r")\b", re.IGNORECASE)
+
+
+def normalize_answer(text) -> str:
+    """Lowercase, unify apostrophes, collapse whitespace, trim edge punctuation."""
+    if not isinstance(text, str):
+        return ""
+    text = text.lower().replace("\u2019", "'").replace("\u2018", "'")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(_EDGE_PUNCTUATION)
+
+
+def is_non_answer(text) -> bool:
+    """True for empty text, filler-only text or a short, known non-answer phrase.
+
+    Exact match after normalisation, never a substring match: "I don't know the
+    exact method, but I would use a hash map" is a real answer.
+    """
+    norm = normalize_answer(text)
+    if not norm:
+        return True
+    if not re.sub(r"[\W_]+", "", _FILLER_ONLY.sub(" ", norm)):
+        return True
+    return len(norm.split()) <= MAX_NON_ANSWER_WORDS and norm in NON_ANSWER_PHRASES
+
+
+# -------------------------------------------------------------
 # BLOCK 3: Rubric retrieval by cosine similarity (in PostgreSQL)
 # -------------------------------------------------------------
 # Calls the cosine_similarity(FLOAT8[], FLOAT8[]) SQL function defined in

@@ -27,7 +27,8 @@ class ModeTests(unittest.TestCase):
                     result = main.start_interview(main.StartInterviewRequest(firebase_uid=FIREBASE_UID, interview_mode=mode), user=TEST_USER)
                 query, params = next(call for call in cursor.calls if 'INSERT INTO interviews' in call[0])
                 self.assertIn('interview_mode', query)
-                self.assertEqual(params[-1], mode)
+                self.assertEqual(params[5], mode)
+                self.assertEqual(params[7], 'general' if mode == 'game' else None)  # arena category
                 self.assertEqual(result['interview_mode'], mode)
                 self.assertEqual(result['max_turns'], 6 if mode == 'game' else 5)
                 self.assertEqual(any('INSERT INTO arena_stats' in q for q, _ in cursor.calls), mode == 'game')

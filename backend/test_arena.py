@@ -124,7 +124,10 @@ class ArenaPersistenceTests(unittest.TestCase):
         state = self.game(6)
         answer = {**response(6, score=88), 'difficulty': 'expert'}
         cursor = ArenaCursor(state, answer)
-        result = adaptive_service.advance(cursor, state)
+        # The ranked finish (integrity + rating) is covered in test_ranking.py.
+        with patch.object(arena, 'finalize', return_value={'ratings': {}}) as finalize:
+            result = adaptive_service.advance(cursor, state)
+        finalize.assert_called_once()
         self.assertEqual(state['status'], 'completed')
         self.assertTrue(result['is_complete'])
         self.assertEqual(result['game']['boss_score'], 88)
@@ -153,7 +156,8 @@ class ArenaPersistenceTests(unittest.TestCase):
         state = {**self.game(6), 'status': 'completed'}
         cursor = ArenaCursor(state, response(6))
         cursor.stats.update(total_xp=640, best_streak=4, highest_difficulty='expert', boss_score=88)
-        cursor.fetchall = lambda: [dict(question_index=1, topic='API', answer_quality_score=90, feedback='Clear reasoning'), dict(question_index=6, topic='Concurrency', answer_quality_score=60, feedback='Discuss races')]
+        turns = [dict(question_index=1, topic='API', answer_quality_score=90, feedback='Clear reasoning'), dict(question_index=6, topic='Concurrency', answer_quality_score=60, feedback='Discuss races')]
+        cursor.fetchall = lambda: turns if 'arena_turns' in cursor.query else []
         result = arena.results(cursor, state)
         self.assertEqual(result['average_score'], 75)
         self.assertEqual(result['total_xp'], 640)

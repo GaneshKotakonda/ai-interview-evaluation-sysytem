@@ -12,6 +12,10 @@ import { analyzeFaceResult, createVisionStats, getFaceLandmarker, metricsSnapsho
 // Two tallies are kept: one for the whole session and one for the current
 // question (`segmentKey`), which resets whenever the question changes, so
 // each submitted answer carries its own camera metrics.
+//
+// `onFrame(observation, time)` receives every analysed frame (face count,
+// gaze, lip gap) for the interview's integrity checks; `sampleIntervalMs`
+// is lowered there so eye movements while reading can be followed.
 const SAMPLE_INTERVAL_MS = 200;
 
 // Add one observation of `elapsed` milliseconds to a tally.
@@ -42,7 +46,9 @@ function Metric({ label, value, percent }) {
   );
 }
 
-export default function BehaviorMonitor({ videoRef, active, onMetricsChange, segmentKey }) {
+export default function BehaviorMonitor({
+  videoRef, active, onMetricsChange, segmentKey, onFrame, sampleIntervalMs = SAMPLE_INTERVAL_MS,
+}) {
   const [status, setStatus] = useState('Loading vision model…');
   const [metrics, setMetrics] = useState(null);
   const statsRef = useRef(createVisionStats());
@@ -53,10 +59,12 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange, seg
   const runningRef = useRef(false);
   const previousMultipleFaceRef = useRef(false);
   const onMetricsChangeRef = useRef(onMetricsChange);
+  const onFrameRef = useRef(onFrame);
 
   useEffect(() => {
     onMetricsChangeRef.current = onMetricsChange;
-  }, [onMetricsChange]);
+    onFrameRef.current = onFrame;
+  }, [onMetricsChange, onFrame]);
 
   // A new question starts a fresh per-answer tally.
   useEffect(() => {
@@ -106,16 +114,17 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange, seg
             const sessionSnapshot = metricsSnapshot(statsRef.current);
             setMetrics({ ...answerSnapshot, faceCount: observation.faceCount, expression: observation.expression });
             onMetricsChangeRef.current?.(sessionSnapshot, answerSnapshot);
+            onFrameRef.current?.(observation, now);
           } catch (error) {
             // Technical detail goes to the console, not to the candidate.
             console.warn('Camera analysis error', error);
             setStatus('Camera analysis paused; the interview continues normally.');
           }
 
-          // Throttle: wait SAMPLE_INTERVAL_MS, then sync with the next frame.
+          // Throttle: wait sampleIntervalMs, then sync with the next frame.
           timeoutRef.current = window.setTimeout(() => {
             animationRef.current = requestAnimationFrame(loop);
-          }, SAMPLE_INTERVAL_MS);
+          }, sampleIntervalMs);
         };
 
         animationRef.current = requestAnimationFrame(loop);
@@ -135,7 +144,7 @@ export default function BehaviorMonitor({ videoRef, active, onMetricsChange, seg
       if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [active, videoRef]);
+  }, [active, videoRef, sampleIntervalMs]);
 
   return (
     <section className="card reveal p-5" style={{ '--i': 4 }}>

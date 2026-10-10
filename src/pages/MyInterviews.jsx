@@ -39,7 +39,9 @@ const SORTS = {
 };
 
 function StatusBadge({ interview }) {
+  if (interview.integrity_verdict === 'invalid') return <Badge tone="bad">Invalid</Badge>;
   if (interview.ended_early) return <Badge tone="bad">Ended early</Badge>;
+  if (interview.integrity_verdict === 'review') return <Badge tone="warn">Needs review</Badge>;
   return isCompleted(interview)
     ? <Badge tone="ok">Completed</Badge>
     : <Badge tone="warn">Incomplete</Badge>;

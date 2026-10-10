@@ -4,6 +4,10 @@
 >
 > **Update — voice interview:** one-click spoken interview with Piper text-to-speech, silence detection, whole-session chunked recording, hidden per-answer grading with a holistic final evaluation, and a typed accessibility mode. Verified by backend and frontend tests and an end-to-end run on the real stack (PostgreSQL, Gemini, Whisper, Piper).
 >
+> **Version 1.2:** built-in VPL coding round, ranked Arena with overall and category ratings, rules read aloud, 3 warnings / 5 seconds away, focus mode, improved silence detection, local setup guide (docs/LOCAL_SETUP.md).
+>
+> **Version 1.1:** identity verification (voice + face), malpractice detection (other people, phones, other voices, reading, injected text), per-answer penalties with a verdict, and stricter grading.
+>
 > **Version 1 complete:** proctoring added (fullscreen, leaving-the-interview detection, blocked copy/paste, second display, camera signals, automatic end at the violation limit, Integrity report). **Version 2:** coding round with VPL (Virtual Programming Lab) and Safe Exam Browser lockdown.
 >
 > Decisions taken: keep **PostgreSQL** (not Firestore); **faster-whisper** for speech-to-text with Gemini as fallback; recordings served through the **authenticated backend endpoint** (not Firebase Storage).

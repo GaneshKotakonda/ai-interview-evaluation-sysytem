@@ -89,6 +89,41 @@ export default function ArenaResults() {
         </div>
       </Panel>
 
+      {results.ended_early && (
+        <Notice tone="bad">
+          {results.end_reason === 'away'
+            ? 'This Arena ended because you stayed outside it too long. Unplayed levels scored 0 and a penalty was applied to your rating.'
+            : 'This Arena ended after repeated integrity warnings. Unplayed levels scored 0 and a penalty was applied to your rating.'}
+        </Notice>
+      )}
+      {results.integrity?.verdict === 'invalid' && (
+        <Notice tone="bad">The candidate's identity could not be confirmed, so this session scored 0.</Notice>
+      )}
+
+      {results.ratings && (
+        <Panel i={2} className="p-6 sm:p-7">
+          <SectionTitle
+            title="Rating"
+            description="LeetCode-style rating: your score compared with the difficulty you reached, minus integrity penalties."
+            action={<Link to="/arena/leaderboard" className="text-[13px] text-ink-2 underline decoration-line-strong underline-offset-4 hover:text-ink">Leaderboard</Link>}
+          />
+          <ul className="mt-5 grid gap-4 sm:grid-cols-2">
+            {Object.entries(results.ratings).sort(([a]) => (a === 'overall' ? -1 : 1)).map(([key, item]) => (
+              <li key={key} className="rounded-control border border-line p-4">
+                <p className="text-[13px] text-ink-3">{item.label}</p>
+                <p className="mt-1 flex items-baseline gap-2">
+                  <span className="num font-serif text-4xl leading-none text-ink">{item.rating}</span>
+                  <span className={`num font-mono text-sm ${item.change >= 0 ? 'text-ok' : 'text-bad'}`}>{item.change >= 0 ? '+' : ''}{item.change}</span>
+                </p>
+                <p className="mt-1 text-xs text-ink-3">
+                  Rank #{item.rank} of {item.total}{item.penalty ? ` · includes −${item.penalty} integrity penalty` : ''}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       <section className="grid gap-5 sm:grid-cols-2">
         {[['Strongest Areas', results.strongest_areas], ['Areas to Practice', results.practice_areas]].map(([title, topics], index) => (
           <Panel key={title} i={index + 2} as="article" className="p-6">

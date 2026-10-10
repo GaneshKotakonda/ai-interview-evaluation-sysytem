@@ -26,7 +26,9 @@ export default function InterviewComplete() {
   // -------------------------------------------------------------
   const duration = Number(localStorage.getItem(STORAGE_KEYS.duration));
   const interviewId = localStorage.getItem(STORAGE_KEYS.interviewId);
-  const endedEarly = localStorage.getItem(STORAGE_KEYS.endedEarly) === '1';
+  const endedReason = localStorage.getItem(STORAGE_KEYS.endedEarly);
+  const endedEarly = Boolean(endedReason);
+  const endReason = endedReason === 'away' ? 'away' : 'violations';
 
   // Real camera measurements from the interview, or null when the vision
   // model never produced data (the report then omits camera engagement).
@@ -67,7 +69,7 @@ export default function InterviewComplete() {
           visionMetrics || {},
           Number.isFinite(duration) && duration > 0 ? duration : 0,
           // Proctoring ended the interview: unanswered questions score 0.
-          ...(endedEarly ? [true] : []),
+          ...(endedEarly ? [true, endReason] : []),
         );
 
         if (!isMounted) return;
@@ -155,7 +157,7 @@ export default function InterviewComplete() {
           <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>{endedEarly ? 'Interview ended early' : 'Interview complete'}</h1>
           <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
             {endedEarly
-              ? 'The interview ended after repeated integrity violations. Your answers so far are saved; unanswered questions score 0.'
+              ? `${endReason === 'away' ? 'You stayed outside the interview for too long.' : 'The interview ended after repeated integrity warnings.'} Your answers so far are saved; unanswered questions score 0.`
               : 'Your answers and recordings are saved. We are combining every turn into your final report.'}
           </p>
 
@@ -178,6 +180,16 @@ export default function InterviewComplete() {
           />
 
           {evaluationError && <Notice tone="warn" className="mt-4">{evaluationError}</Notice>}
+          {evaluationReport?.integrity?.verdict === 'invalid' && (
+            <Notice tone="bad" className="mt-4">
+              This interview is invalid: the candidate&apos;s identity could not be confirmed throughout, so it scores 0. The report shows the evidence.
+            </Notice>
+          )}
+          {evaluationReport?.integrity?.verdict === 'review' && (
+            <Notice tone="warn" className="mt-4">
+              Integrity issues were found and some answers were penalised. The report&apos;s Integrity section explains why.
+            </Notice>
+          )}
 
           <ol className="mt-5 space-y-1">
             {analysisItems.map((item, index) => (

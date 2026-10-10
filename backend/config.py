@@ -96,7 +96,27 @@ TTS_CACHE_DIR = _env_str("TTS_CACHE_DIR", os.path.join(BACKEND_DIR, "tts_cache")
 
 # Proctoring: leaving the interview (fullscreen exit, tab switch, another
 # window or app) this many times ends the interview automatically.
-PROCTORING_MAX_VIOLATIONS = _env_int("PROCTORING_MAX_VIOLATIONS", 5)
+PROCTORING_MAX_VIOLATIONS = _env_int("PROCTORING_MAX_VIOLATIONS", 3)
+# Staying outside the interview (another tab, window or app) this many
+# seconds in one go ends the interview at once.
+PROCTORING_MAX_AWAY_SECONDS = _env_int("PROCTORING_MAX_AWAY_SECONDS", 5)
+
+# Coding round (VPL). Code runs in code_runner.py: in this process for local
+# testing, or in the separate locked-down runner container when
+# CODE_RUNNER_URL is set (see deploy/docker-compose.yml).
+CODE_RUNNER_URL = _env_str("CODE_RUNNER_URL")
+RUNNER_TOKEN = _env_str("RUNNER_TOKEN")
+CODE_TIME_LIMIT_SECONDS = float(_env_str("CODE_TIME_LIMIT_SECONDS", "2"))
+CODING_MINUTES_PER_PROBLEM = _env_int("CODING_MINUTES_PER_PROBLEM", 20)
+
+# Identity verification (identity.py): the enrolled voice and face are
+# compared with every spoken answer and with face snapshots. "on" | "off".
+# Models are downloaded by backend/download_models.py into IDENTITY_MODEL_DIR.
+IDENTITY_CHECKS = _env_str("IDENTITY_CHECKS", "on").lower()
+IDENTITY_MODEL_DIR = _env_str("IDENTITY_MODEL_DIR", os.path.join(BACKEND_DIR, "models"))
+SPEAKER_MODEL = _env_str("SPEAKER_MODEL", "nemo_en_titanet_small.onnx")
+FACE_DETECTOR_MODEL = _env_str("FACE_DETECTOR_MODEL", "face_detection_yunet_2023mar.onnx")
+FACE_RECOGNIZER_MODEL = _env_str("FACE_RECOGNIZER_MODEL", "face_recognition_sface_2021dec.onnx")
 
 # Whole-interview recording, uploaded in chunks while the interview runs.
 MAX_SESSION_RECORDING_MB = _env_int("MAX_SESSION_RECORDING_MB", 800)

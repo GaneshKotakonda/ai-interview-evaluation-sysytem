@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight,
-  Camera,
-  Mic,
-  RotateCcw,
-  ShieldAlert,
-  SkipForward,
+  ArrowRight, Camera, Code2, Mic, RotateCcw, SkipForward,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BehaviorMonitor from '../components/BehaviorMonitor';
+import CodingWorkspace from '../components/CodingWorkspace';
+import {
+  IdentityEnrolment, IntegrityOverlays, RulesStep, TerminatedScreen, VoiceBars,
+} from '../components/IntegrityScreens';
 import {
   Badge, FlowSteps, Notice, Panel, Skeleton, Spinner,
 } from '../components/ui';
@@ -18,20 +17,21 @@ import { speak, stopSpeaking, playTurnChime } from '../services/speech';
 import { createVoiceMonitor } from '../services/voiceActivity';
 import { startAnswerRecording } from '../services/answerRecorder';
 import { startSessionRecording } from '../services/sessionRecorder';
-import {
-  enterFullscreen, exitFullscreen, fullscreenSupported, hasMultipleDisplays, startProctoring,
-} from '../services/proctoring';
-import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
+import { exitFullscreen, fullscreenSupported, hasMultipleDisplays } from '../services/proctoring';
+import { createAnswerSignals, isVirtualDevice } from '../services/malpracticeSignals';
+import { useIntegrityGuard } from '../hooks/useIntegrityGuard';
+import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode, readCodingRound } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // BLOCK 0: Interview pacing (voice mode)
 // -------------------------------------------------------------
-// After the candidate has spoken, this much silence starts a short
-// countdown; speaking again cancels it. The countdown then moves on.
-const SILENCE_BEFORE_COUNTDOWN_MS = 4000;
-const COUNTDOWN_MS = 3000;
+// Once the candidate has spoken, SILENCE_TO_ADVANCE_MS of silence moves on
+// to the next question; a countdown shows for the last two seconds and
+// speaking again cancels it.
+const SILENCE_TO_ADVANCE_MS = 3000;
+const COUNTDOWN_FROM_MS = 1000;
 // Spoken at least this long before silence can end an answer.
-const MIN_SPEECH_MS = 800;
+const MIN_SPEECH_MS = 1200;
 // No voice at all after this long: show a "we can't hear you" hint.
 const NO_VOICE_HINT_MS = 20000;
 // Hard limit per answer.
@@ -45,25 +45,6 @@ const INTERVIEW_ID_KEY = STORAGE_KEYS.interviewId;
 function formatClock(totalSeconds) {
   const safe = Math.max(0, Math.floor(totalSeconds));
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
-}
-
-// Animated bars: the interviewer speaking (level = null) or the live mic level.
-function VoiceBars({ level = null, bars = 18 }) {
-  return (
-    <div className="flex h-10 items-center gap-[3px]" aria-hidden="true">
-      {Array.from({ length: bars }, (_, index) => {
-        const shape = 0.35 + 0.65 * Math.abs(Math.sin((index + 1) * 1.7));
-        const height = level === null ? shape : Math.max(0.12, Math.min(1, level * 1.6 * shape + 0.08));
-        return (
-          <span
-            key={index}
-            className={`w-[3px] rounded-full bg-ink transition-[height] duration-150 ${level === null ? 'wave-bar' : ''}`}
-            style={{ height: `${Math.round(height * 100)}%`, '--i': index }}
-          />
-        );
-      })}
-    </div>
-  );
 }
 
 export default function Interview() {
@@ -83,7 +64,7 @@ export default function Interview() {
   const visionMetricsRef = useRef(null);    // session camera metrics
   const answerVisionRef = useRef(null);     // this answer's camera metrics
   const responseIdRef = useRef(null);       // accepted answer awaiting advance
-  const pendingRef = useRef(null);          // { text } answer awaiting submit
+  const pendingRef = useRef(null);          // answer awaiting submit
   const pendingAudioRef = useRef(null);     // recorded answer awaiting transcription
   const answerStartRef = useRef(0);
   const noSpeechRetriesRef = useRef(0);
@@ -92,13 +73,9 @@ export default function Interview() {
   const startRequestRef = useRef(null);
   const resumeRef = useRef(null);           // /state payload when resuming
   const beganAtRef = useRef(null);
-  // Proctoring
-  const proctorRef = useRef(null);
-  const violationsRef = useRef(0);
-  const maxViolationsRef = useRef(5);
-  const eventQueueRef = useRef([]);
-  const terminatedRef = useRef(false);
   const turnRef = useRef(1);
+  const stageRef = useRef('loading');
+  const answerSignalsRef = useRef(null);    // this answer's integrity signals
 
   // -------------------------------------------------------------
   // BLOCK 2: State
@@ -118,14 +95,41 @@ export default function Interview() {
   const [elapsed, setElapsed] = useState(0);
   const [listen, setListen] = useState({ level: 0, countdown: null, seconds: 0, noVoice: false });
   const [recordingIssue, setRecordingIssue] = useState(false);
-  const [away, setAway] = useState(null);           // current "left the interview" episode
-  const [violations, setViolations] = useState(0);
-  const [maxViolations, setMaxViolations] = useState(5);
+  const [virtualDevice, setVirtualDevice] = useState(null);
   const multipleDisplays = useMemo(() => hasMultipleDisplays(), []);
 
   const targetRole = useMemo(() => localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer', []);
   const targetJd = useMemo(() => localStorage.getItem(STORAGE_KEYS.jobDescription) || '', []);
   const isLastTurn = currentTurn >= maxTurns;
+  const coding = question?.kind === 'coding';
+
+  // Proctoring and malpractice detection. Ending early (too many warnings
+  // or staying away) saves what was answered and goes to the report.
+  const guard = useIntegrityGuard({
+    videoRef,
+    monitorRef,
+    turnRef,
+    gazeWarnings: true,
+    context: () => ({
+      part: sessionRef.current?.part ?? null,
+      at: sessionRef.current ? sessionRef.current.elapsedSeconds() : null,
+    }),
+    onTerminate: async (reason) => {
+      setStage('terminated');
+      stopSpeaking();
+      answerRecRef.current?.cancel?.();
+      monitorRef.current?.stop();
+      localStorage.setItem(STORAGE_KEYS.endedEarly, reason || 'violations');
+      const duration = beganAtRef.current ? Math.round((Date.now() - beganAtRef.current) / 1000) : 0;
+      localStorage.setItem(DURATION_KEY, String(duration));
+      if (visionMetricsRef.current) {
+        localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
+      }
+      await (sessionRef.current?.stop() ?? Promise.resolve());
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      if (!unmountedRef.current) setTimeout(() => navigate('/interview-complete'), 2500);
+    },
+  });
 
   // -------------------------------------------------------------
   // BLOCK 3: Start or resume the session (before the candidate clicks Start)
@@ -154,10 +158,17 @@ export default function Interview() {
           startRequestRef.current = (async () => {
             const resumable = await resumeState(localStorage.getItem(INTERVIEW_ID_KEY));
             if (resumable) return resumable;
+            const codingRound = readCodingRound();
+            const resumeText = localStorage.getItem(STORAGE_KEYS.resumeText) || '';
+            const options = {
+              ...(codingRound === null ? {} : { codingRound }),
+              ...(resumeText ? { resumeText } : {}),
+            };
             return api.startInterview(
               localStorage.getItem(STORAGE_KEYS.roleTitle) || 'Software Engineer', user?.uid || null,
               localStorage.getItem(STORAGE_KEYS.jobDescription) || null,
               user?.email || null, user?.displayName || null, 5, 'standard', answerMode,
+              ...(Object.keys(options).length ? [options] : []),
             );
           })();
         }
@@ -169,10 +180,13 @@ export default function Interview() {
         }
         if (!data?.question?.question || !data.interview_id) throw new Error('Invalid interview session');
         setInterviewId(data.interview_id);
-        maxViolationsRef.current = data.proctoring?.max_violations || 5;
-        setMaxViolations(maxViolationsRef.current);
-        violationsRef.current = data.proctoring?.violations || 0;
-        setViolations(violationsRef.current);
+        guard.configure({
+          interviewId: data.interview_id,
+          maxViolations: data.proctoring?.max_violations || 3,
+          violations: data.proctoring?.violations || 0,
+          maxAwaySeconds: data.proctoring?.max_away_seconds || 5,
+          identity: data.identity || { enabled: false, enrolled: false },
+        });
         setQuestion(data.question);
         setCurrentTurn(data.current_turn);
         setMaxTurns(data.max_turns);
@@ -220,6 +234,9 @@ export default function Interview() {
           return;
         }
         streamRef.current = stream;
+        const virtual = [...stream.getVideoTracks(), ...stream.getAudioTracks()]
+          .map((track) => track?.label).find(isVirtualDevice);
+        if (virtual) setVirtualDevice(virtual);
         setCameraReady(stream.getVideoTracks().length > 0);
         setMicrophoneReady(stream.getAudioTracks().length > 0);
       } catch (error) {
@@ -228,7 +245,7 @@ export default function Interview() {
     })();
     return () => {
       unmountedRef.current = true;
-      proctorRef.current?.stop();
+      guard.stop();
       exitFullscreen();
       stopSpeaking();
       monitorRef.current?.stop();
@@ -236,6 +253,7 @@ export default function Interview() {
       sessionRef.current?.stop({ timeoutMs: 5000 });
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Attach the stream whenever the video element is (re)mounted.
@@ -254,6 +272,7 @@ export default function Interview() {
   }, [stage]);
 
   useEffect(() => { turnRef.current = currentTurn; }, [currentTurn]);
+  useEffect(() => { stageRef.current = stage; }, [stage]);
 
   // Keep the journey in storage for the completion page and the report.
   useEffect(() => {
@@ -265,36 +284,37 @@ export default function Interview() {
   // -------------------------------------------------------------
   // BLOCK 5: The interview loop
   // -------------------------------------------------------------
-  // speak question → chime → listen → (Next | silence | time limit) →
-  // transcribe → grade silently → speak next question … → outro → report.
-  const startListening = useCallback(() => {
-    if (unmountedRef.current || terminatedRef.current) return;
+  // speak question → chime → listen (or code in the VPL) → (Next | silence |
+  // time limit | Submit) → transcribe → grade silently → next question …
+  const startAnswer = useCallback((turnQuestion) => {
+    if (unmountedRef.current || guard.isTerminated()) return;
+    const codingTurn = turnQuestion?.kind === 'coding';
     answerStartRef.current = sessionRef.current?.elapsedSeconds() ?? 0;
     setListen({ level: 0, countdown: null, seconds: 0, noVoice: false });
     pendingAudioRef.current = null;
-    if (voiceMode) {
-      answerRecRef.current = startAnswerRecording(streamRef.current);
-      monitorRef.current?.reset();
-    }
-    setStage('listening');
-  }, [voiceMode]);
+    answerSignalsRef.current = createAnswerSignals({ voiceMode: voiceMode && !codingTurn, now: performance.now() });
+    guard.newAnswer();
+    monitorRef.current?.reset();
+    if (voiceMode && !codingTurn) answerRecRef.current = startAnswerRecording(streamRef.current);
+    setStage(codingTurn ? 'coding' : 'listening');
+  }, [voiceMode, guard]);
 
   const askQuestion = useCallback(async (nextQuestion, id) => {
-    if (unmountedRef.current || terminatedRef.current) return;
+    if (unmountedRef.current || guard.isTerminated()) return;
     setQuestion(nextQuestion);
     setTypedAnswer('');
     noSpeechRetriesRef.current = 0;
     setStage('speaking');
     await speak({ interviewId: id, item: `question-${nextQuestion.index}` },
       `Question ${nextQuestion.index}. ${nextQuestion.question}`);
-    if (unmountedRef.current || terminatedRef.current) return;
+    if (unmountedRef.current || guard.isTerminated()) return;
     playTurnChime();
-    startListening();
-  }, [startListening]);
+    startAnswer(nextQuestion);
+  }, [startAnswer, guard]);
 
   const finishInterview = useCallback(async (id) => {
-    if (terminatedRef.current) return;
-    proctorRef.current?.stop();
+    if (guard.isTerminated()) return;
+    guard.stop();
     setStage('finishing');
     monitorRef.current?.stop();
     const duration = beganAtRef.current ? Math.round((Date.now() - beganAtRef.current) / 1000) : 0;
@@ -306,114 +326,37 @@ export default function Interview() {
     if (visionMetricsRef.current) {
       localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
     }
-    await flushEvents(id);
+    await guard.flushEvents();
     await exitFullscreen();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if (!unmountedRef.current) navigate('/interview-complete');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigate]);
-
-  // -------------------------------------------------------------
-  // BLOCK 5b: Proctoring
-  // -------------------------------------------------------------
-  // Integrity events are queued and sent in order; a failed send stays in
-  // the queue and goes with the next one (the server ignores repeats).
-  async function flushEvents(id = interviewId) {
-    if (!id || !eventQueueRef.current.length || typeof api.reportProctoringEvents !== 'function') return;
-    const batch = eventQueueRef.current.slice(0, 50);
-    try {
-      await api.reportProctoringEvents(id, batch);
-      eventQueueRef.current = eventQueueRef.current.slice(batch.length);
-    } catch {
-      // Kept for the next attempt.
-    }
-  }
-
-  const queueEvent = (event) => {
-    eventQueueRef.current.push({
-      id: event.id,
-      type: event.type,
-      question_index: event.question_index ?? null,
-      part: event.part ?? null,
-      at: event.at ?? null,
-      duration: event.duration ?? null,
-      details: event.details || {},
-    });
-    flushEvents();
-  };
-
-  const proctorContext = () => ({
-    question_index: turnRef.current,
-    part: sessionRef.current?.part ?? null,
-    at: sessionRef.current ? sessionRef.current.elapsedSeconds() : null,
-  });
-
-  // Too many violations: end the interview now; unanswered questions score 0.
-  const terminate = useCallback(async () => {
-    if (terminatedRef.current) return;
-    terminatedRef.current = true;
-    proctorRef.current?.stop();
-    setAway(null);
-    setStage('terminated');
-    stopSpeaking();
-    answerRecRef.current?.cancel?.();
-    monitorRef.current?.stop();
-    localStorage.setItem(STORAGE_KEYS.endedEarly, '1');
-    const duration = beganAtRef.current ? Math.round((Date.now() - beganAtRef.current) / 1000) : 0;
-    localStorage.setItem(DURATION_KEY, String(duration));
-    if (visionMetricsRef.current) {
-      localStorage.setItem(STORAGE_KEYS.visionMetrics, JSON.stringify(visionMetricsRef.current));
-    }
-    await Promise.all([flushEvents(), sessionRef.current?.stop() ?? Promise.resolve()]);
-    await exitFullscreen();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    if (!unmountedRef.current) setTimeout(() => navigate('/interview-complete'), 2500);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigate, interviewId]);
-
-  const startWatching = () => {
-    proctorRef.current?.stop();
-    proctorRef.current = startProctoring({
-      context: proctorContext,
-      onLeave: (episode) => {
-        violationsRef.current += 1;
-        setViolations(violationsRef.current);
-        setAway(episode);
-        queueEvent({ ...episode, details: { types: [...episode.types] } });
-        if (violationsRef.current >= maxViolationsRef.current) terminate();
-      },
-      onReturn: (episode) => {
-        setAway(null);
-        queueEvent({ ...episode, details: { types: episode.types } });
-      },
-      onMinor: (event) => queueEvent(event),
-    });
-  };
-
-  const returnToInterview = async () => {
-    await enterFullscreen();
-    window.focus?.();
-    proctorRef.current?.check();
-  };
+  }, [navigate, guard]);
 
   // Submit (once) and advance. Retries reuse the accepted response.
-  const submitAndAdvance = useCallback(async (id, turnQuestion, text) => {
+  const submitAndAdvance = useCallback(async (id, turnQuestion) => {
+    const pending = pendingRef.current || {};
     if (!responseIdRef.current) {
-      const recording = sessionRef.current
-        ? { part: sessionRef.current.part, start: answerStartRef.current, end: sessionRef.current.elapsedSeconds() }
-        : null;
-      const saved = await api.submitAnswer(id, {
-        questionIndex: turnQuestion.index,
-        questionText: turnQuestion.question,
-        candidateAnswer: text,
-        videoBlob: null,
-        visionMetrics: answerVisionRef.current,
-        recording,
-      });
+      const saved = turnQuestion.kind === 'coding'
+        ? await api.submitCode(id, {
+          questionIndex: turnQuestion.index, language: pending.language, code: pending.code,
+          answerSignals: pending.signals || null,
+        })
+        : await api.submitAnswer(id, {
+          questionIndex: turnQuestion.index,
+          questionText: turnQuestion.question,
+          candidateAnswer: pending.text ?? '',
+          videoBlob: null,
+          visionMetrics: answerVisionRef.current,
+          recording: sessionRef.current
+            ? { part: sessionRef.current.part, start: answerStartRef.current, end: sessionRef.current.elapsedSeconds() }
+            : null,
+          answerSignals: pending.signals || null,
+        });
       if (!saved?.response_id) throw new Error('Missing response identifier');
       responseIdRef.current = saved.response_id;
+      const answer = turnQuestion.kind === 'coding' ? pending.code : pending.text ?? '';
       setResponses((current) => current.map((item, index) => (index === current.length - 1
-        ? { ...item, answer: text, completed: true, response_id: saved.response_id, evaluation: saved.evaluation }
+        ? { ...item, answer, completed: true, response_id: saved.response_id, evaluation: saved.evaluation }
         : item)));
     }
     const result = await api.nextQuestion(id, responseIdRef.current);
@@ -435,48 +378,58 @@ export default function Interview() {
   }, [askQuestion, finishInterview]);
 
   // Ends the current answer: transcribe (voice) and hand over to grading.
-  const finishAnswer = useCallback(async () => {
-    if (busyRef.current || !interviewId || !question) return;
+  // `codeAnswer` ({ language, code }) comes from the VPL on coding turns.
+  const finishAnswer = useCallback(async (codeAnswer = null) => {
+    if (busyRef.current || !interviewId || !question || guard.isTerminated()) return;
     busyRef.current = true;
     setFlowError('');
     setStage('processing');
     try {
       if (!pendingRef.current && !responseIdRef.current) {
-        let text = '';
-        if (voiceMode) {
-          // Keep the audio until it is transcribed, so a network retry
-          // never loses the spoken answer.
-          let blob = pendingAudioRef.current;
-          if (!blob) {
-            blob = await answerRecRef.current?.stop();
-            answerRecRef.current = null;
-            pendingAudioRef.current = blob || null;
+        if (question.kind === 'coding') {
+          const code = codeAnswer?.code ?? '';
+          pendingRef.current = {
+            language: codeAnswer?.language || 'python', code,
+            signals: answerSignalsRef.current?.summary(code.length) || null,
+          };
+        } else {
+          let text = '';
+          if (voiceMode) {
+            // Keep the audio until it is transcribed, so a network retry
+            // never loses the spoken answer.
+            let blob = pendingAudioRef.current;
+            if (!blob) {
+              blob = await answerRecRef.current?.stop();
+              answerRecRef.current = null;
+              pendingAudioRef.current = blob || null;
+              speak({ phrase: 'thanks' }, '');
+            }
+            if (blob) {
+              try {
+                const result = await api.transcribeAnswer(interviewId, question.index, blob);
+                text = (result?.transcript || '').trim();
+                guard.handleServerResult(result?.identity);
+              } catch (error) {
+                if (error?.status === 422 && noSpeechRetriesRef.current < 1) {
+                  // Nothing intelligible was heard: ask once more.
+                  noSpeechRetriesRef.current += 1;
+                  await speak({ phrase: 'no_speech' }, "Sorry, I couldn't hear an answer. Please try answering again.");
+                  busyRef.current = false;
+                  startAnswer(question);
+                  return;
+                }
+                if (error?.status !== 422) throw error;
+              }
+            }
+          } else {
+            text = typedAnswer.trim();
             speak({ phrase: 'thanks' }, '');
           }
-          if (blob) {
-            try {
-              const result = await api.transcribeAnswer(interviewId, question.index, blob);
-              text = (result?.transcript || '').trim();
-            } catch (error) {
-              if (error?.status === 422 && noSpeechRetriesRef.current < 1) {
-                // Nothing intelligible was heard: ask once more.
-                noSpeechRetriesRef.current += 1;
-                await speak({ phrase: 'no_speech' }, "Sorry, I couldn't hear an answer. Please try answering again.");
-                busyRef.current = false;
-                startListening();
-                return;
-              }
-              if (error?.status !== 422) throw error;
-            }
-          }
-        } else {
-          text = typedAnswer.trim();
-          speak({ phrase: 'thanks' }, '');
+          pendingRef.current = { text, signals: answerSignalsRef.current?.summary(text.length) || null };
         }
-        pendingRef.current = { text };
         pendingAudioRef.current = null;
       }
-      await submitAndAdvance(interviewId, question, pendingRef.current?.text ?? '');
+      await submitAndAdvance(interviewId, question);
     } catch {
       setFlowError(responseIdRef.current
         ? 'Your answer is saved. Retry to continue to the next question.'
@@ -485,26 +438,12 @@ export default function Interview() {
     } finally {
       busyRef.current = false;
     }
-  }, [interviewId, question, voiceMode, typedAnswer, startListening, submitAndAdvance]);
+  }, [interviewId, question, voiceMode, typedAnswer, startAnswer, submitAndAdvance, guard]);
 
-  // The candidate's click also unlocks audio playback (browser autoplay rules).
-  const begin = useCallback(async () => {
-    if (!interviewId || busyRef.current) return;
-    beganAtRef.current = Date.now();
-    // Fullscreen needs this click (a user gesture); then watch for leaving.
-    const fullscreen = await enterFullscreen();
+  // After the rules and the identity check: the interview itself.
+  const proceed = useCallback(async () => {
     const resumed = resumeRef.current;
-    const part = (resumed?.recording_parts?.length ? Math.max(...resumed.recording_parts) : 0) + 1;
-    if (streamRef.current) {
-      sessionRef.current = startSessionRecording({
-        stream: streamRef.current, interviewId, part,
-        onUploadError: () => setRecordingIssue(true),
-      });
-      if (voiceMode) monitorRef.current = createVoiceMonitor(streamRef.current);
-    }
-    startWatching();
-    if (!fullscreen) queueEvent({ id: `fs-${Date.now()}`, type: 'fullscreen_unavailable', ...proctorContext() });
-    if (multipleDisplays) queueEvent({ id: `md-${Date.now()}`, type: 'multiple_displays', ...proctorContext() });
+    guard.startSnapshots();
     if (resumed?.pending_response_id) {
       // The last answer was saved before the reload; continue from it.
       pendingRef.current = { text: '' };
@@ -517,8 +456,41 @@ export default function Interview() {
         `Welcome to your ${targetRole} interview. Answer each question out loud, then pause or select Next.`);
     }
     await askQuestion(question, interviewId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interviewId, question, voiceMode, targetRole, askQuestion, finishAnswer, multipleDisplays]);
+  }, [interviewId, question, targetRole, askQuestion, finishAnswer, guard]);
+
+  // The candidate's click also unlocks audio playback (browser autoplay rules)
+  // and fullscreen (both need a user gesture).
+  const begin = useCallback(async () => {
+    if (!interviewId || busyRef.current) return;
+    beganAtRef.current = Date.now();
+    const resumed = resumeRef.current;
+    const part = (resumed?.recording_parts?.length ? Math.max(...resumed.recording_parts) : 0) + 1;
+    if (streamRef.current) {
+      sessionRef.current = startSessionRecording({
+        stream: streamRef.current, interviewId, part,
+        onUploadError: () => setRecordingIssue(true),
+      });
+      // Needed in both modes: enrolment and lip-movement checks use it.
+      monitorRef.current = createVoiceMonitor(streamRef.current);
+    }
+    await guard.start({ multipleDisplays });
+    if (resumed) {
+      if (guard.needsEnrolment()) setStage('enrolling');
+      else await proceed();
+      return;
+    }
+    setStage('rules');
+  }, [interviewId, multipleDisplays, guard, proceed]);
+
+  const afterRules = useCallback(async () => {
+    if (guard.needsEnrolment()) setStage('enrolling');
+    else await proceed();
+  }, [guard, proceed]);
+
+  const afterEnrolment = useCallback(async (identity) => {
+    guard.setIdentity(identity);
+    await proceed();
+  }, [guard, proceed]);
 
   const repeatQuestion = useCallback(async () => {
     answerRecRef.current?.cancel?.();
@@ -532,9 +504,10 @@ export default function Interview() {
   useEffect(() => {
     if (stage !== 'listening' || !voiceMode) return undefined;
     const timer = setInterval(() => {
-      // While the candidate is away the answer cannot end by silence.
-      if (proctorRef.current?.isAway()) return;
+      // While the candidate is away (or reading a warning) the answer cannot end by silence.
+      if (guard.isPaused()) return;
       const snapshot = monitorRef.current?.snapshot();
+      if (snapshot?.speaking) answerSignalsRef.current?.markActivity(performance.now());
       if (!snapshot) {
         const seconds = (sessionRef.current?.elapsedSeconds() ?? 0) - answerStartRef.current;
         setListen((current) => ({ ...current, seconds }));
@@ -542,19 +515,18 @@ export default function Interview() {
         return;
       }
       const spoke = snapshot.speechMs >= MIN_SPEECH_MS;
-      const quietFor = spoke ? snapshot.silenceMs - SILENCE_BEFORE_COUNTDOWN_MS : -1;
-      const countdown = quietFor > 0 ? Math.max(0, Math.ceil((COUNTDOWN_MS - quietFor) / 1000)) : null;
+      const quiet = spoke && !snapshot.speaking ? snapshot.silenceMs : 0;
+      const countdown = quiet >= COUNTDOWN_FROM_MS ? Math.max(0, Math.ceil((SILENCE_TO_ADVANCE_MS - quiet) / 1000)) : null;
       setListen({
         level: snapshot.level,
         countdown,
         seconds: snapshot.elapsedMs / 1000,
         noVoice: !spoke && snapshot.elapsedMs > NO_VOICE_HINT_MS,
       });
-      if ((spoke && quietFor >= COUNTDOWN_MS) || snapshot.elapsedMs >= MAX_ANSWER_MS) finishAnswer();
+      if ((spoke && quiet >= SILENCE_TO_ADVANCE_MS) || snapshot.elapsedMs >= MAX_ANSWER_MS) finishAnswer();
     }, TICK_MS);
     return () => clearInterval(timer);
-  }, [stage, voiceMode, finishAnswer]);
-  // `fullscreenSupported` is used for the ready-screen rules below.
+  }, [stage, voiceMode, finishAnswer, guard]);
   const canFullscreen = fullscreenSupported();
 
   // -------------------------------------------------------------
@@ -605,21 +577,27 @@ export default function Interview() {
               <ul className="mt-6 space-y-2.5 text-sm text-ink-2">
                 <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />Each question is read aloud. Use headphones or turn your volume up.</li>
                 <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />
-                  {voiceMode ? 'Answer out loud. Select Next when you finish, or pause and the interview moves on.' : 'Type each answer and submit it.'}
+                  {voiceMode ? 'Answer out loud. Select Next when you finish, or stay silent for 3 seconds and the interview moves on.' : 'Type each answer and submit it.'}
                 </li>
+                <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />Coding questions open a code editor with test cases.</li>
                 <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />The whole interview is recorded on camera. Your report appears at the end.</li>
                 <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-bad" />
                   <span>
-                    <span className="font-medium text-ink">Stay in the interview.</span>{' '}
-                    {canFullscreen ? 'It runs in fullscreen. ' : ''}Switching tabs, windows or apps, copying and pasting are recorded; after {maxViolations} times the interview ends automatically.
+                    <span className="font-medium text-ink">Stay in the interview, alone.</span>{' '}
+                    {canFullscreen ? 'It runs in fullscreen. ' : ''}The rules are read out next; {guard.maxViolations} warnings, or staying away {guard.maxAwaySeconds} seconds, ends the interview.
                   </span>
                 </li>
               </ul>
+              {virtualDevice && (
+                <Notice tone="warn" className="mt-6">
+                  &ldquo;{virtualDevice}&rdquo; is a virtual camera or microphone, which is not allowed. Choose your real devices in the browser&apos;s site settings and reload the page.
+                </Notice>
+              )}
               {multipleDisplays && <Notice tone="warn" className="mt-6">A second display is connected. Disconnect it before starting; this is recorded in your report.</Notice>}
               {resumed && <Notice className="mt-6">Your earlier answers are saved. The interview continues from question {currentTurn}.</Notice>}
               {mediaError && <Notice tone="warn" className="mt-6">{mediaError}</Notice>}
               {voiceBlocked && !mediaError && <Notice tone="warn" className="mt-6">Waiting for microphone access…</Notice>}
-              <button onClick={begin} disabled={voiceBlocked} className="primary-btn mt-8 !px-6 !py-3.5 text-[15px]">
+              <button onClick={begin} disabled={voiceBlocked || Boolean(virtualDevice)} className="primary-btn mt-8 !px-6 !py-3.5 text-[15px]">
                 {resumed ? 'Continue Interview' : 'Start Interview'} <ArrowRight className="h-4 w-4" />
               </button>
             </div>
@@ -633,43 +611,71 @@ export default function Interview() {
     );
   }
 
+  if (stage === 'rules') {
+    return (
+      <>
+        <IntegrityOverlays guard={guard} />
+        <RulesStep maxViolations={guard.maxViolations} maxAwaySeconds={guard.maxAwaySeconds} onContinue={afterRules} />
+        <video ref={videoRef} autoPlay muted playsInline className="sr-only" aria-hidden="true" />
+      </>
+    );
+  }
+
+  if (stage === 'enrolling') {
+    return (
+      <>
+        <IntegrityOverlays guard={guard} />
+        <IdentityEnrolment interviewId={interviewId} videoRef={videoRef} streamRef={streamRef} monitorRef={monitorRef} onDone={afterEnrolment} />
+      </>
+    );
+  }
+
   if (stage === 'terminated') {
     return (
-      <Panel className="mx-auto max-w-xl p-8 text-center">
-        <ShieldAlert className="mx-auto h-8 w-8 text-bad" />
-        <h1 className="mt-4 font-serif text-[2rem] leading-tight text-ink">Interview ended</h1>
-        <p className="mt-3 text-sm leading-relaxed text-ink-2">
-          You left the interview {violations} times. Your answers so far are saved and graded; unanswered questions score 0.
-        </p>
-        <p className="mt-4 flex items-center justify-center gap-2 text-xs text-ink-3"><Spinner /> Saving the recording and preparing your report…</p>
-      </Panel>
+      <TerminatedScreen
+        reason={guard.terminated}
+        violations={guard.violations}
+        maxAwaySeconds={guard.maxAwaySeconds}
+        detail="Your answers so far are saved and graded; unanswered questions score 0."
+      />
     );
   }
 
   const statusLine = {
     speaking: 'Interviewer is asking…',
     listening: voiceMode ? 'Listening' : 'Your answer',
+    coding: 'Coding question',
     processing: 'Thinking…',
     retry: 'Connection problem',
     finishing: 'Wrapping up…',
   }[stage];
 
+  const status = (
+    <Panel i={5} className="p-5">
+      <h2 className="text-[15px] font-semibold text-ink">Live status</h2>
+      <ul className="mt-3 divide-y divide-line">
+        {[
+          ['Camera', cameraReady ? 'Active' : 'Unavailable', cameraReady],
+          ['Microphone', microphoneReady ? 'Active' : 'Unavailable', microphoneReady],
+          ['Answer mode', voiceMode ? 'Spoken' : 'Typed', true],
+          ['Answered', `${responses.filter((item) => item.completed).length} of ${maxTurns}`, true],
+          ['Identity', guard.enrolled ? 'Verified at start' : 'Not checked', guard.enrolled],
+          ['Integrity warnings', `${guard.violations} of ${guard.maxViolations}`, guard.violations === 0],
+        ].map(([label, value, ok]) => (
+          <li key={label} className="flex items-center justify-between py-2.5 text-[13px]">
+            <span className="text-ink-2">{label}</span>
+            <span className={`flex items-center gap-2 ${ok ? 'text-ink' : 'text-warn'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-ok' : 'bg-warn'}`} />{value}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      {away && (
-        <div className="fade-in fixed inset-0 z-[60] grid place-items-center bg-ink/80 p-4 backdrop-blur-sm">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="away-title" className="scale-in w-full max-w-md rounded-panel border border-line bg-surface p-7 text-center shadow-pop">
-            <ShieldAlert className="mx-auto h-8 w-8 text-bad" />
-            <h2 id="away-title" className="mt-4 font-serif text-[1.8rem] leading-tight text-ink">You left the interview</h2>
-            <p className="mt-3 text-sm leading-relaxed text-ink-2">
-              Leaving fullscreen, switching tabs or opening other windows and apps is not allowed and has been recorded.
-            </p>
-            <p className="mt-4 text-sm font-medium text-bad">Warning {violations} of {maxViolations}</p>
-            <p className="mt-1 text-xs text-ink-3">At {maxViolations} the interview ends and unanswered questions score 0.</p>
-            <button className="primary-btn mt-6 w-full !py-3" onClick={returnToInterview}>Return to the interview</button>
-          </div>
-        </div>
-      )}
+    <div className="mx-auto max-w-[1500px] space-y-6">
+      <IntegrityOverlays guard={guard} />
 
       {/* Header: role, question counter, recording, elapsed time, progress */}
       <header className="reveal space-y-4">
@@ -705,20 +711,39 @@ export default function Interview() {
         </div>
       </header>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
         <section className="space-y-5">
+          {guard.attention && !guard.warning && !guard.away && (
+            <Notice tone="warn" role="alert">{guard.attention.message}</Notice>
+          )}
           {/* The interviewer: question + what is happening now */}
           <Panel i={1} as="article" key={`question-${currentTurn}`} className="overflow-hidden">
-            <div className="p-6 sm:p-8">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="num font-mono text-ink-3">Q{currentTurn}</span>
-                <span className="text-ink-4">·</span>
-                <Badge>{question?.difficulty?.replace(/^./, (c) => c.toUpperCase())}</Badge>
-                {question?.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
-                {question?.topic && <span className="text-ink-3">{question.topic}</span>}
+            {coding && stage === 'coding' ? (
+              <div className="p-5 sm:p-6">
+                <CodingWorkspace
+                  interviewId={interviewId}
+                  question={question}
+                  signals={answerSignalsRef.current}
+                  onInjected={(chars) => guard.flagOnce('text_injected', { chars, source: 'editor' })}
+                  onSubmit={(answer) => finishAnswer(answer)}
+                />
               </div>
-              <h2 className="mt-4 font-serif text-[1.5rem] leading-snug text-ink sm:text-[1.75rem]">{question?.question}</h2>
-            </div>
+            ) : (
+              <div className="p-6 sm:p-8">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="num font-mono text-ink-3">Q{currentTurn}</span>
+                  <span className="text-ink-4">·</span>
+                  <Badge>{question?.difficulty?.replace(/^./, (c) => c.toUpperCase())}</Badge>
+                  {coding && <Badge tone="ink"><Code2 className="h-3 w-3" /> Coding</Badge>}
+                  {question?.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
+                  {question?.topic && <span className="text-ink-3">{question.topic}</span>}
+                </div>
+                <h2 className="mt-4 font-serif text-[1.5rem] leading-snug text-ink sm:text-[1.75rem]">
+                  {coding ? question.coding?.title : question?.question}
+                </h2>
+                {coding && <p className="mt-2 text-sm text-ink-2">{question.coding?.statement}</p>}
+              </div>
+            )}
 
             <div className="border-t border-line bg-paper/60 px-6 py-5 sm:px-8" aria-live="polite">
               <div className="flex flex-wrap items-center justify-between gap-4">
@@ -730,11 +755,12 @@ export default function Interview() {
                   <div className="min-w-0">
                     <p role="status" className="text-sm font-medium text-ink">{statusLine}</p>
                     <p className="text-xs text-ink-3">
-                      {stage === 'speaking' && 'Listen to the question. Your answer starts after the chime.'}
-                      {stage === 'listening' && voiceMode && listen.countdown === null && `${formatClock(listen.seconds)} · speak naturally, then pause or select Next`}
+                      {stage === 'speaking' && (coding ? 'Listen to the problem. The code editor opens after the chime.' : 'Listen to the question. Your answer starts after the chime.')}
+                      {stage === 'listening' && voiceMode && listen.countdown === null && `${formatClock(listen.seconds)} · speak naturally; 3 seconds of silence moves on`}
                       {stage === 'listening' && voiceMode && listen.countdown !== null && `Moving on in ${listen.countdown}… keep talking to continue`}
                       {stage === 'listening' && !voiceMode && 'Type your answer, then submit.'}
-                      {stage === 'processing' && 'Evaluating your answer and preparing what comes next.'}
+                      {stage === 'coding' && 'Write your solution, run the examples, then submit. Paste is disabled.'}
+                      {stage === 'processing' && (coding ? 'Running every test case and reviewing your code.' : 'Evaluating your answer and preparing what comes next.')}
                       {stage === 'finishing' && 'Saving the recording and preparing your report.'}
                     </p>
                   </div>
@@ -751,7 +777,7 @@ export default function Interview() {
                     </button>
                   )}
                   {stage === 'listening' && voiceMode && (
-                    <button className="primary-btn" onClick={finishAnswer}>
+                    <button className="primary-btn" onClick={() => finishAnswer()}>
                       {isLastTurn ? 'Finish Interview' : 'Next Question'} <ArrowRight className="h-4 w-4" />
                     </button>
                   )}
@@ -763,7 +789,7 @@ export default function Interview() {
               )}
               {stage === 'listening' && voiceMode && listen.countdown !== null && (
                 <div className="mt-4 h-1 overflow-hidden rounded-full bg-line" aria-hidden="true">
-                  <div className="h-full rounded-full bg-ink transition-[width] duration-200" style={{ width: `${(listen.countdown / 3) * 100}%` }} />
+                  <div className="h-full rounded-full bg-ink transition-[width] duration-200" style={{ width: `${(listen.countdown / 2) * 100}%` }} />
                 </div>
               )}
 
@@ -773,12 +799,21 @@ export default function Interview() {
                     aria-label="Your answer"
                     rows="7"
                     value={typedAnswer}
-                    onChange={(event) => setTypedAnswer(event.target.value)}
+                    onKeyDown={(event) => {
+                      answerSignalsRef.current?.typing.keydown(event);
+                      answerSignalsRef.current?.markActivity();
+                    }}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      const injected = answerSignalsRef.current?.typing.input(event.nativeEvent, value.length - typedAnswer.length);
+                      if (injected) guard.flagOnce('text_injected', { chars: value.length - typedAnswer.length });
+                      setTypedAnswer(value);
+                    }}
                     className="input-field resize-y !text-[15px] leading-relaxed"
                     placeholder="Explain your approach, the concepts involved and the trade-offs you would weigh…"
                   />
                   <div className="mt-3 flex justify-end">
-                    <button className="primary-btn" onClick={finishAnswer} disabled={!typedAnswer.trim()}>
+                    <button className="primary-btn" onClick={() => finishAnswer()} disabled={!typedAnswer.trim()}>
                       {isLastTurn ? 'Finish Interview' : 'Submit Answer'} <ArrowRight className="h-4 w-4" />
                     </button>
                   </div>
@@ -788,7 +823,7 @@ export default function Interview() {
               {stage === 'retry' && (
                 <div className="mt-4 space-y-3">
                   <Notice tone="warn" role="alert">{flowError}</Notice>
-                  <button className="primary-btn" onClick={finishAnswer}>
+                  <button className="primary-btn" onClick={() => finishAnswer()}>
                     {responseIdRef.current ? 'Retry Next Question' : 'Retry Submission'}
                   </button>
                 </div>
@@ -798,7 +833,7 @@ export default function Interview() {
         </section>
 
         {/* Camera, engagement and status */}
-        <aside className="space-y-5 xl:sticky xl:top-24 xl:self-start">
+        <aside className="space-y-5 xl:sticky xl:top-6 xl:self-start">
           <Panel i={3} className="overflow-hidden">
             <div className="relative aspect-video bg-ink">
               <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
@@ -823,31 +858,18 @@ export default function Interview() {
             videoRef={videoRef}
             active={cameraReady}
             segmentKey={currentTurn}
+            sampleIntervalMs={100}
+            onFrame={(observation, time) => guard.handleFrame(observation, time, {
+              signals: answerSignalsRef.current,
+              listening: stageRef.current === 'listening' || stageRef.current === 'coding',
+            })}
             onMetricsChange={(sessionMetrics, answerMetrics) => {
               visionMetricsRef.current = sessionMetrics;
               answerVisionRef.current = answerMetrics;
             }}
           />
 
-          <Panel i={5} className="p-5">
-            <h2 className="text-[15px] font-semibold text-ink">Live status</h2>
-            <ul className="mt-3 divide-y divide-line">
-              {[
-                ['Camera', cameraReady ? 'Active' : 'Unavailable', cameraReady],
-                ['Microphone', microphoneReady ? 'Active' : 'Unavailable', microphoneReady],
-                ['Answer mode', voiceMode ? 'Spoken' : 'Typed', true],
-                ['Answered', `${responses.filter((item) => item.completed).length} of ${maxTurns}`, true],
-                ['Integrity warnings', `${violations} of ${maxViolations}`, violations === 0],
-              ].map(([label, value, ok]) => (
-                <li key={label} className="flex items-center justify-between py-2.5 text-[13px]">
-                  <span className="text-ink-2">{label}</span>
-                  <span className={`flex items-center gap-2 ${ok ? 'text-ink' : 'text-warn'}`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-ok' : 'bg-warn'}`} />{value}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </Panel>
+          {status}
         </aside>
       </div>
     </div>

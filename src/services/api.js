@@ -87,6 +87,8 @@ export const api = {
     maxTurns = 5,
     interviewMode = 'standard',
     answerMode = 'typed',
+    // { codingRound: true|false (omit to decide from the role), arenaCategory }
+    options = {},
   ) {
     return request(`${API_BASE_URL}/api/interviews/start`, {
       method: 'POST',
@@ -99,8 +101,19 @@ export const api = {
         max_turns: maxTurns,
         interview_mode: interviewMode,
         ...(interviewMode === 'standard' ? { answer_mode: answerMode } : {}),
+        ...(options.resumeText ? { resume_text: options.resumeText } : {}),
+        ...(typeof options.codingRound === 'boolean' ? { coding_round: options.codingRound } : {}),
+        ...(options.arenaCategory ? { arena_category: options.arenaCategory } : {}),
       },
     }, 'Failed to start interview');
+  },
+
+  // 1b. Read an uploaded resume (PDF, DOCX or TXT) and return its plain text.
+  // The text is sent back with startInterview so questions can use it.
+  parseResume(file) {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return request(`${API_BASE_URL}/api/resume/parse`, { method: 'POST', formData }, 'Failed to read the resume');
   },
 
   // 2. Submit one answer (text + optional recorded video and this answer's
@@ -108,7 +121,11 @@ export const api = {
   // resubmitting the same text returns the original result.
   // `recording` = { part, start, end } locates the answer (in seconds) inside
   // the whole-interview recording, for playback from the report.
-  submitAnswer(interviewId, { questionIndex, questionText, candidateAnswer, videoBlob, visionMetrics, recording }) {
+  // `answerSignals`: browser integrity signals for this answer (response
+  // latency, gaze, lip movement, typing); see services/malpracticeSignals.js.
+  submitAnswer(interviewId, {
+    questionIndex, questionText, candidateAnswer, videoBlob, visionMetrics, recording, answerSignals,
+  }) {
     const formData = new FormData();
     formData.append('question_index', questionIndex);
     formData.append('question_text', questionText);
@@ -123,6 +140,9 @@ export const api = {
       formData.append('recording_part', recording.part);
       formData.append('answer_start_seconds', recording.start);
       formData.append('answer_end_seconds', recording.end);
+    }
+    if (answerSignals) {
+      formData.append('answer_signals', JSON.stringify(answerSignals));
     }
     return request(interviewPath(interviewId, 'submit-answer'), { method: 'POST', formData },
       'Failed to submit answer');
@@ -209,7 +229,7 @@ export const api = {
   // 6. Standard only: aggregate saved evaluations into the final report.
   // `visionMetrics` may be {} when the camera model produced no data.
   // `endedEarly`: proctoring ended the interview; unanswered turns score 0.
-  completeInterview(interviewId, visionMetrics = {}, durationSeconds = 0, endedEarly = false) {
+  completeInterview(interviewId, visionMetrics = {}, durationSeconds = 0, endedEarly = false, endReason = null) {
     const safeDuration = Number.isFinite(durationSeconds)
       ? Math.max(0, Math.round(durationSeconds))
       : 0;
@@ -219,6 +239,7 @@ export const api = {
         vision_metrics: visionMetrics,
         duration_seconds: safeDuration,
         ...(endedEarly ? { ended_early: true } : {}),
+        ...(endedEarly && endReason ? { end_reason: endReason } : {}),
       },
     }, 'Failed to complete evaluation');
   },
@@ -228,6 +249,75 @@ export const api = {
   reportProctoringEvents(interviewId, events) {
     return request(interviewPath(interviewId, 'proctoring'), { method: 'POST', json: { events } },
       'Failed to record integrity event');
+  },
+
+  // 6c. Identity enrolment before the first question: a photo and the
+  // candidate reading one sentence aloud. 422 carries a message to show.
+  enrollIdentity(interviewId, photoBlob, audioBlob) {
+    const formData = new FormData();
+    formData.append('photo', photoBlob, 'enroll.jpg');
+    if (audioBlob) formData.append('audio', audioBlob, `enroll.${extensionFor(audioBlob)}`);
+    return request(interviewPath(interviewId, 'identity/enroll'), { method: 'POST', formData },
+      'Identity check failed');
+  },
+
+  // 6d. A face snapshot during the interview, compared with the enrolment.
+  identitySnapshot(interviewId, photoBlob, { question_index: questionIndex, part, at } = {}) {
+    const formData = new FormData();
+    formData.append('photo', photoBlob, 'snapshot.jpg');
+    if (questionIndex) formData.append('question_index', questionIndex);
+    if (part) formData.append('part', part);
+    if (Number.isFinite(at)) formData.append('at', Math.max(0, at));
+    return request(interviewPath(interviewId, 'identity/snapshot'), { method: 'POST', formData },
+      'Camera check failed');
+  },
+
+  // 6e. Owner-only identity evidence image (enrolment photo, flagged snapshot).
+  async getIdentityImageUrl(interviewId, name) {
+    const blob = await requestBlob(interviewPath(interviewId, `identity/images/${encodeURIComponent(name)}`),
+      'Failed to load image');
+    return URL.createObjectURL(blob);
+  },
+
+  // 6f. Coding round (VPL): languages this server can run.
+  getCodingLanguages() {
+    return request(`${API_BASE_URL}/api/coding/languages`, {}, 'Failed to load languages');
+  },
+
+  // 6g. Run code on the visible examples (and optionally your own input).
+  runCode(interviewId, { questionIndex, language, code, customInput }) {
+    return request(interviewPath(interviewId, 'code/run'), {
+      method: 'POST',
+      json: {
+        question_index: questionIndex, language, code,
+        ...(customInput !== undefined && customInput !== null ? { custom_input: customInput } : {}),
+      },
+    }, 'Failed to run code');
+  },
+
+  // 6h. Submit code: graded on every test (hidden ones too) plus a code review.
+  submitCode(interviewId, { questionIndex, language, code, answerSignals }) {
+    return request(interviewPath(interviewId, 'code/submit'), {
+      method: 'POST',
+      json: { question_index: questionIndex, language, code, ...(answerSignals ? { answer_signals: answerSignals } : {}) },
+    }, 'Failed to submit code');
+  },
+
+  // 6i. Ranked Arena ended early ("away" or "violations"): penalties apply.
+  endArena(interviewId, reason) {
+    return request(interviewPath(interviewId, 'arena-end'), { method: 'POST', json: { reason } },
+      'Failed to end Arena');
+  },
+
+  // 6j. Arena ranking: leaderboard of a category ('overall' by default).
+  getLeaderboard(category = 'overall', limit = 50) {
+    return request(`${API_BASE_URL}/api/arena/leaderboard?category=${encodeURIComponent(category)}&limit=${limit}`, {},
+      'Failed to load leaderboard');
+  },
+
+  // 6k. The signed-in user's ratings, ranks and recent rating changes.
+  getMyRanking() {
+    return request(`${API_BASE_URL}/api/arena/me`, {}, 'Failed to load ranking');
   },
 
   // 7. Saved Standard report, including every turn of the adaptive journey.

@@ -120,12 +120,17 @@ class SttServiceTests(unittest.TestCase):
 # -------------------------------------------------------------
 # Multi-criteria grading
 # -------------------------------------------------------------
+# Long enough that the short-answer caps (apply_strictness) do not apply.
+LONG_ANSWER = ("I would start from the access pattern, choose the data model around it, add an index for the "
+               "hot query and measure latency before and after the change to confirm the improvement.")
+
+
 class CriteriaEvaluationTests(unittest.TestCase):
     def _evaluate(self, data):
         client = MagicMock()
         client.models.generate_content.return_value.text = json.dumps(data)
         with patch.object(gemini_service, "get_client", return_value=client):
-            return gemini_service.evaluate_answer_with_rag("q", "an answer", ["private rubric point"], 0.6, 1)
+            return gemini_service.evaluate_answer_with_rag("q", LONG_ANSWER, ["private rubric point"], 0.6, 1)
 
     def test_answer_quality_is_weighted_mean_of_criteria(self):
         result = self._evaluate({"correctness": 80, "completeness": 60, "technical_depth": 70, "relevance": 100,

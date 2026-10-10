@@ -2,7 +2,8 @@
 
 No database or network access, so every rule here is unit-testable.
 
-Scoring v2 combines every module:
+Scoring v3 is strict: skipped answers earn nothing and the weighted score is
+scaled by the share of questions actually answered. It combines every module:
   answer quality   – Gemini + RAG, from four criteria (gemini_service)
   communication    – clarity and structure of the answer (Gemini)
   speech delivery  – pace, fillers and pauses from the audio (speech_analysis);
@@ -14,7 +15,7 @@ from typing import Iterable, Optional
 
 import nlp_evaluator
 
-SCORING_VERSION = 2
+SCORING_VERSION = 3
 
 # -------------------------------------------------------------
 # BLOCK 1: Report weights
@@ -23,10 +24,10 @@ SCORING_VERSION = 2
 # no data (e.g. no camera), its weight is dropped and the others are
 # re-normalised, instead of inventing a value.
 WEIGHTS = {
-    "answer_quality": 0.40,
-    "communication": 0.25,
-    "camera_engagement": 0.20,
-    "speech_fluency": 0.15,
+    "answer_quality": 0.70,
+    "communication": 0.15,
+    "speech_fluency": 0.10,
+    "camera_engagement": 0.05,
 }
 
 # Score used for a component when no per-answer value exists at all.
@@ -73,12 +74,15 @@ def aggregate_fillers(answers: Iterable[str]) -> dict:
     return summary
 
 
-def speech_fluency(total_fillers: int, answer_count: int) -> int:
+def speech_fluency(total_fillers: int, answer_count: int) -> Optional[int]:
     """Text-only fallback: 95 minus 2 points per filler *per answer*, 50..98.
 
     Used when no answer was spoken. Normalising by the number of answers
     keeps a 10-question interview from scoring lower than a 3-question one.
+    Returns None when there are no answers: nothing was said, so nothing to rate.
     """
+    if answer_count <= 0:
+        return None
     per_answer = total_fillers / max(1, answer_count)
     return round(max(50, min(98, 95 - per_answer * 2)))
 
@@ -184,7 +188,7 @@ def applied_weights(answer_quality, communication, camera, fluency) -> dict:
 
 
 def overall_score(answer_quality: int, communication: int,
-                  camera: Optional[int], fluency: int) -> int:
+                  camera: Optional[int], fluency: Optional[int]) -> int:
     """Weighted overall score in 0..100 (see WEIGHTS)."""
     parts = {
         "answer_quality": answer_quality,
@@ -196,6 +200,53 @@ def overall_score(answer_quality: int, communication: int,
     total_weight = sum(WEIGHTS[name] for name in used)
     weighted = sum(WEIGHTS[name] * value for name, value in used.items())
     return round(weighted / total_weight)
+
+
+# -------------------------------------------------------------
+# BLOCK 3b: Completion ratio (skipped questions)
+# -------------------------------------------------------------
+def _response_answer(response: dict):
+    # Raw interview_responses rows use candidate_answer; report turns use answer.
+    answer = response.get("candidate_answer")
+    return answer if answer is not None else response.get("answer")
+
+
+def _response_source(response: dict):
+    source = response.get("evaluation_source")
+    if source is None and isinstance(response.get("evaluation"), dict):
+        source = response["evaluation"].get("evaluation_source")
+    return source
+
+
+def is_substantive(response: dict) -> bool:
+    """Answered = code submitted for coding turns, otherwise not a non-answer.
+
+    A malpractice-penalised answer is still an attempt, so it counts.
+    """
+    answer = _response_answer(response)
+    if response.get("coding_result"):
+        return bool((answer or "").strip())
+    if _response_source(response) in ("skipped", "empty"):
+        return False
+    return not nlp_evaluator.is_non_answer(answer)
+
+
+def completion(responses, max_turns) -> dict:
+    """How many of the planned questions got a substantive answer."""
+    responses = list(responses)
+    total = max(1, int(max_turns or len(responses) or 1))
+    answered = min(total, sum(1 for r in responses if is_substantive(r)))
+    return {"answered": answered, "total": total,
+            "skipped": total - answered,
+            "ratio": answered / total,
+            "rate_percent": round(100 * answered / total)}
+
+
+def final_score(weighted: int, comp: dict) -> int:
+    """Scale the weighted score by the completion ratio; nothing answered = 0."""
+    if comp["answered"] == 0:
+        return 0
+    return _clamp_percent(weighted * comp["ratio"])
 
 
 # -------------------------------------------------------------
@@ -212,7 +263,7 @@ CRITERION_LABELS = {
 def insights(criteria: Optional[dict], speech: Optional[dict], vision: Optional[dict]) -> tuple[list, list]:
     """Return (strengths, improvements) derived from criteria, speech and camera."""
     strengths, improvements = [], []
-    if criteria and len(criteria) > 1:
+    if criteria and len(criteria) > 1 and any(criteria.values()):
         ranked = sorted(criteria.items(), key=lambda item: item[1])
         weakest, strongest = ranked[0], ranked[-1]
         if strongest[1] >= 75:

@@ -12,6 +12,7 @@ import Report from './pages/Report';
 import Arena from './pages/Arena';
 import ArenaPlay from './pages/ArenaPlay';
 import ArenaResults from './pages/ArenaResults';
+import Leaderboard from './pages/Leaderboard';
 import MyInterviews from './pages/MyInterviews';
 import Reports from './pages/Reports';
 import Profile from './pages/Profile';
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/interview-complete" element={<InterviewComplete />} />
           <Route path="/arena" element={<Arena />} />
           <Route path="/arena/results" element={<ArenaResults />} />
+          <Route path="/arena/leaderboard" element={<Leaderboard />} />
           <Route path="/arena/play" element={<ArenaPlay />} />
           <Route path="/report" element={<Report />} />
           <Route path="/interviews" element={<MyInterviews />} />

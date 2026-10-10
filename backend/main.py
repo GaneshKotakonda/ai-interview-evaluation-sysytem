@@ -15,6 +15,15 @@ Endpoints (all under /api):
     GET  /interviews/{id}/speech/{item}     spoken intro/outro/question (Piper)
     GET  /speech/{phrase}                   fixed spoken phrases (Piper)
     POST /interviews/{id}/proctoring        integrity events (leaving the interview…)
+    POST /interviews/{id}/identity/enroll   enrolment photo + spoken sentence
+    POST /interviews/{id}/identity/snapshot face check against the enrolment
+    GET  /interviews/{id}/identity/images/{name}  owner-only evidence images
+    GET  /coding/languages                  languages the VPL can run here
+    POST /interviews/{id}/code/run          run code on the visible examples
+    POST /interviews/{id}/code/submit       grade a coding answer on all tests
+    POST /interviews/{id}/arena-end         end a ranked Arena early (penalties)
+    GET  /arena/leaderboard                 ranking, overall or by category
+    GET  /arena/me                          the signed-in user's ratings and ranks
     POST /interviews/{id}/submit-answer     save, embed and grade one answer
     POST /interviews/{id}/next-question     apply policy, issue the next turn
     POST /interviews/{id}/hint              Arena only: spend the one hint
@@ -36,6 +45,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from typing import Literal, Optional
@@ -53,6 +63,14 @@ from auth import AuthUser
 import database
 import integrity
 import gemini_service
+import assessment
+import coding
+import code_runner
+import identity
+import malpractice
+import nlp_evaluator
+import ranking
+import resume
 import scoring
 import speech_analysis
 import stt_service
@@ -76,6 +94,8 @@ async def lifespan(_app: FastAPI):
     database.test_db_connection()
     threading.Thread(target=stt_service.warm_up, daemon=True).start()
     threading.Thread(target=tts_service.warm_up, daemon=True).start()
+    threading.Thread(target=identity.warm_up, daemon=True).start()
+    threading.Thread(target=coding.warm_up, daemon=True).start()
     yield
 
 
@@ -220,10 +240,16 @@ class StartInterviewRequest(BaseModel):
     user_id: Optional[str] = None
     role_title: str = Field(default="Software Engineer", max_length=100)
     job_description: Optional[str] = None
+    # Plain text from POST /api/resume/parse; questions are tailored to it.
+    resume_text: Optional[str] = Field(default=None, max_length=resume.MAX_RESUME_CHARS)
     interview_mode: Literal["standard", "game"] = "standard"
     # How answers are given: "voice" (spoken, transcribed) or "typed".
     answer_mode: Literal["voice", "typed"] = "typed"
     max_turns: int = Field(default=5, ge=1, le=20)
+    # Coding round in the VPL: None decides from the role and job description.
+    coding_round: Optional[bool] = None
+    # Arena ranking category (see ranking.CATEGORIES).
+    arena_category: Optional[str] = Field(default=None, max_length=30)
 
 
 class HintRequest(BaseModel):
@@ -243,6 +269,8 @@ class EvaluateInterviewRequest(BaseModel):
     # True when proctoring ended the interview before every turn was
     # answered; unanswered turns then score 0.
     ended_early: bool = False
+    # Why it ended early: "away" (stayed outside too long) or "violations".
+    end_reason: Optional[Literal["away", "violations"]] = None
 
 
 class ProctoringEvent(BaseModel):
@@ -267,12 +295,15 @@ def _clean(value: Optional[str]) -> Optional[str]:
 # -------------------------------------------------------------
 # BLOCK 5: Response shape shared by /complete and /report
 # -------------------------------------------------------------
-def completion_response(report):
+def completion_response(report, comp=None):
     """Stable report contract for the first submission and every retry.
 
     Components without data (e.g. camera engagement when the camera model
-    never loaded) are left out of ``scores`` instead of shown as 0.
+    never loaded) are left out of ``scores`` instead of shown as 0. When no
+    question was answered, Speech Fluency stays in the list as ``null`` so the
+    page can show "—". ``comp`` is the completion summary (scoring.completion).
     """
+    insufficient = bool(comp) and comp["answered"] == 0
     speech_fluency = report.get("speech_fluency_score")
     if speech_fluency is None:
         speech_fluency = report.get("voice_confidence_score")
@@ -285,7 +316,8 @@ def completion_response(report):
     return {
         "interview_id": str(report["interview_id"]),
         "overall_score": report["overall_score"],
-        "scores": [score for score in scores if score["value"] is not None],
+        "scores": [score for score in scores
+                   if score["value"] is not None or (insufficient and score["label"] == "Speech Fluency")],
         "speech_fluency_score": speech_fluency,
         "camera_engagement_score": report["camera_engagement_score"],
         "strengths": report["strengths"], "improvements": report["improvements"],
@@ -299,7 +331,25 @@ def completion_response(report):
             "weights": report.get("scoring_weights"),
         },
         "integrity": report.get("integrity"),
+        "completion": comp,
+        "insufficient_responses": insufficient,
     }
+
+
+# -------------------------------------------------------------
+# BLOCK 5b: POST /api/resume/parse
+# -------------------------------------------------------------
+# Reads an uploaded resume (PDF, DOCX or TXT) and returns its plain text.
+# Nothing is stored here: the browser sends the text back when it starts the
+# interview, and it is saved with that interview only.
+@app.post("/api/resume/parse")
+async def parse_resume(file: UploadFile = File(...), user: AuthUser = Depends(auth.current_user)):
+    content = await file.read(resume.MAX_RESUME_BYTES + 1)
+    try:
+        text = resume.extract_text(file.filename, content)
+    except resume.ResumeError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    return {"filename": os.path.basename(file.filename or "resume"), "characters": len(text), "resume_text": text}
 
 
 # -------------------------------------------------------------
@@ -318,6 +368,14 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
     email = _clean(user.email) or _clean(payload.email)
     full_name = _clean(payload.full_name) or _clean(user.name)
     role_title = _clean(payload.role_title) or "Software Engineer"
+    coding_round = (payload.coding_round if payload.coding_round is not None
+                    else coding.suggests_coding(role_title, payload.job_description))
+    # Resumes only shape Standard interviews; Arena questions stay generic.
+    resume_text = resume.clean_text(payload.resume_text) if payload.interview_mode == "standard" else ""
+    resume_text = resume_text or None
+    arena_category = None
+    if payload.interview_mode == "game":
+        arena_category = payload.arena_category if payload.arena_category in ranking.CATEGORIES else "general"
 
     with transaction("Could not start the interview. Please retry.") as (_conn, cur):
         # Step A: Map the external Firebase identity to the internal UUID.
@@ -352,12 +410,13 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         cur.execute(
             """
             INSERT INTO interviews (user_id, role_title, job_description, status, max_turns,
-                                    answer_mode, interview_mode)
-            VALUES (%s, %s, %s, 'in_progress', %s, %s, %s)
+                                    answer_mode, interview_mode, coding_round, arena_category, resume_text)
+            VALUES (%s, %s, %s, 'in_progress', %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """,
             (user_id, role_title, payload.job_description, max_turns,
-             "typed" if payload.interview_mode == "game" else payload.answer_mode, payload.interview_mode)
+             "typed" if payload.interview_mode == "game" else payload.answer_mode, payload.interview_mode,
+             coding_round, arena_category, resume_text)
         )
         interview_id = str(cur.fetchone()["id"])
 
@@ -365,6 +424,7 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         content = gemini_service.generate_adaptive_question(
             role_title=role_title,
             job_description=(payload.job_description or "")[:4000],
+            **resume.prompt_context(resume_text),
             current_difficulty="medium", is_follow_up=False,
             recent_history=[], turn_number=1, max_turns=max_turns,
         )
@@ -378,9 +438,14 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
         "interview_id": interview_id,
         "role_title": role_title,
         "job_description": payload.job_description,
+        "resume_used": bool(resume_text),
         "interview_mode": payload.interview_mode,
         "answer_mode": "typed" if payload.interview_mode == "game" else payload.answer_mode,
-        "proctoring": {"max_violations": config.PROCTORING_MAX_VIOLATIONS},
+        "proctoring": {"max_violations": config.PROCTORING_MAX_VIOLATIONS,
+                       "max_away_seconds": config.PROCTORING_MAX_AWAY_SECONDS},
+        "identity": {"enabled": identity.enabled(), "enrolled": False},
+        "coding_round": coding_round,
+        "arena_category": arena_category,
         "current_turn": 1, "current_difficulty": "medium",
         "max_turns": max_turns, "question": question,
         # Shape compatibility only: one turn, never a pre-generated set.
@@ -407,6 +472,15 @@ def _parse_vision(raw: Optional[str]) -> Optional[dict]:
         return None
 
 
+def _parse_signals(raw: Optional[str]) -> Optional[dict]:
+    if not raw:
+        return None
+    try:
+        return malpractice.sanitize_signals(json.loads(raw[:20000]))
+    except (ValueError, TypeError):
+        return None
+
+
 def _recording_position(part, start, end) -> Optional[dict]:
     """Where an answer sits in the session recording; None when invalid."""
     numbers = (int, float)
@@ -428,9 +502,11 @@ def submit_answer(
     recording_part: Optional[int] = Form(None),
     answer_start_seconds: Optional[float] = Form(None),
     answer_end_seconds: Optional[float] = Form(None),
+    answer_signals: Optional[str] = Form(None),
     user: AuthUser = Depends(auth.current_user),
 ):
     recording = _recording_position(recording_part, answer_start_seconds, answer_end_seconds)
+    signals = _parse_signals(answer_signals)
     with transaction("Could not save and evaluate this answer. Please retry.") as (conn, cur):
         interview = owned_interview(cur, interview_id, user)
         adaptive_service.require_active(interview)
@@ -452,12 +528,15 @@ def submit_answer(
         # Step B: Grade only the question issued by the server; the client's
         # question_text is kept in the form for compatibility but never trusted.
         question = adaptive_service.question_for_submission(cur, interview, question_index)
+        if question.get("kind") == "coding":
+            raise HTTPException(409, "This is a coding question; submit code with /code/submit.")
         video_url = None
         if video and video.filename:
             video_url = save_answer_video(interview_id, question_index, video)
         response = adaptive_service.evaluate_and_store(
             conn, cur, interview, question, candidate_answer, video_url,
             vision_metrics=_parse_vision(vision_metrics), recording=recording,
+            answer_signals=signals,
         )
         return adaptive_service.submission_result(response)
 
@@ -493,6 +572,7 @@ def transcribe_answer(
         )
         if cur.fetchone():
             raise HTTPException(409, "This question already has an accepted answer.")
+        voice_gallery = _voice_gallery(cur, interview_id)
 
     filename = media_filename(question_index, "audio", content_type)
     path = save_upload(interview_id, filename, audio)
@@ -503,6 +583,7 @@ def transcribe_answer(
     if not result["text"].strip():
         raise HTTPException(422, "No speech was detected in the recording. Please try again.")
     metrics = speech_analysis.compute_metrics(result["words"], result["text"])
+    voice_check = _check_voice(path, result["words"], voice_gallery)
 
     with transaction("Could not save the transcript. Please retry.") as (_conn, cur):
         cur.execute(
@@ -520,6 +601,7 @@ def transcribe_answer(
              json.dumps(metrics) if metrics else None, result["source"], result["model"],
              result["language"], result["duration_seconds"], filename),
         )
+        identity_result = _store_voice_check(cur, interview_id, question_index, voice_check)
 
     return {
         "question_index": question_index,
@@ -527,6 +609,80 @@ def transcribe_answer(
         "source": result["source"],
         "duration_seconds": result["duration_seconds"],
         "speech_metrics": metrics,
+        "identity": identity_result,
+    }
+
+
+def _voice_gallery(cur, interview_id: str) -> list:
+    """Enrolled voice embeddings for an interview (empty when not enrolled)."""
+    if not identity.enabled():
+        return []
+    cur.execute("SELECT voice_embeddings FROM identity_profiles WHERE interview_id = %s;", (interview_id,))
+    row = cur.fetchone()
+    return list((row or {}).get("voice_embeddings") or [])
+
+
+def _check_voice(path: str, words: list, gallery: list) -> Optional[dict]:
+    """Compare a spoken answer with the enrolled voice; None when not possible."""
+    if not gallery:
+        return None
+    try:
+        return identity.check_answer_voice(path, words, gallery)
+    except identity.IdentityUnavailable:
+        return None
+    except Exception:
+        logger.exception("Voice check failed")
+        return None
+
+
+def _violation_count(cur, interview_id: str) -> int:
+    cur.execute("SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id = %s;",
+                (interview_id,))
+    return integrity.summarize(cur.fetchall())["violations"]
+
+
+def _server_event(cur, interview_id: str, event_id: str, event_type: str, question_index=None,
+                  details: Optional[dict] = None) -> None:
+    """Record an integrity event raised by the server (idempotent per id)."""
+    cur.execute(
+        """INSERT INTO proctoring_events
+           (interview_id, client_event_id, event_type, question_index, details)
+           VALUES (%s, %s, %s, %s, %s)
+           ON CONFLICT (interview_id, client_event_id) DO NOTHING;""",
+        (interview_id, event_id, event_type, question_index, json.dumps(details or {})),
+    )
+
+
+def _store_voice_check(cur, interview_id: str, question_index: int, check: Optional[dict]) -> Optional[dict]:
+    """Save a voice check, grow the voiceprint on a confident match and
+    raise a violation for another voice. Returns what the browser needs."""
+    if not check:
+        return None
+    embedding = check.pop("embedding", None)
+    cur.execute(
+        """INSERT INTO identity_checks (interview_id, kind, question_index, verdict, similarity, details)
+           VALUES (%s, 'voice', %s, %s, %s, %s);""",
+        (interview_id, question_index, check["verdict"], check.get("similarity"), json.dumps(check)),
+    )
+    event = None
+    if check["verdict"] == "match":
+        cur.execute("SELECT voice_embeddings FROM identity_profiles WHERE interview_id = %s FOR UPDATE;",
+                    (interview_id,))
+        row = cur.fetchone()
+        if row:
+            gallery = identity.grow_gallery(list(row["voice_embeddings"] or []), embedding, check.get("similarity"))
+            cur.execute("UPDATE identity_profiles SET voice_embeddings = %s WHERE interview_id = %s;",
+                        (json.dumps(gallery), interview_id))
+    elif check["verdict"] in ("mismatch", "mixed"):
+        event = "voice_mismatch" if check["verdict"] == "mismatch" else "other_voice"
+        _server_event(cur, interview_id, f"voice-{question_index}", event, question_index,
+                      {"similarity": check.get("similarity"),
+                       "segments": check.get("other_voice_segments", [])[:5]})
+    return {
+        "verdict": check["verdict"],
+        "event": {"type": event, "label": integrity.LABELS[event]} if event else None,
+        "violations": _violation_count(cur, interview_id),
+        "max_violations": config.PROCTORING_MAX_VIOLATIONS,
     }
 
 
@@ -568,7 +724,10 @@ def arena_results(interview_id: str, user: AuthUser = Depends(auth.current_user)
 # 1. Return the saved report if this interview was already completed.
 # 2. Require every configured turn to be answered and evaluated.
 # 3. Reuse per-answer scores (only pre-adaptive sessions are batch-graded).
-# 4. Combine answer quality, communication, camera engagement and speech
+# 4. Integrity: assess every answer (identity checks, live events, browser
+#    signals, reading detection; see malpractice.py), apply the penalties and
+#    decide the verdict. An invalid interview scores 0 overall.
+# 5. Combine answer quality, communication, camera engagement and speech
 #    fluency (see scoring.py) and save the report.
 def _legacy_evaluation_items(cur, interview_id, responses):
     """Build batch-grading input for answers saved before adaptive grading."""
@@ -610,7 +769,8 @@ def complete_and_evaluate_interview(
             cur.execute("SELECT * FROM evaluation_reports WHERE interview_id = %s;", (interview_id,))
             report = cur.fetchone()
             if report:
-                return completion_response(report)
+                return completion_response(report, scoring.completion(
+                    adaptive_service.report_turns(cur, interview_id), interview["max_turns"]))
         adaptive_service.require_active(interview)
 
         cur.execute(
@@ -639,7 +799,13 @@ def complete_and_evaluate_interview(
             raise HTTPException(409, "Answer all configured turns before completing this interview.")
 
         # Step B: Per-answer evaluations (saved, or batch-graded for legacy).
-        filler_summary = scoring.aggregate_fillers(r["candidate_answer"] for r in responses)
+        # Only substantive answers (not skips) feed the averages; the share of
+        # answered questions scales the final score once (scoring.final_score).
+        comp = scoring.completion(responses, interview["max_turns"])
+        substantive = [r for r in responses if scoring.is_substantive(r)]
+        substantive_indexes = {r["question_index"] for r in substantive}
+        spoken_substantive = [r for r in substantive if not r.get("coding_result")]
+        filler_summary = scoring.aggregate_fillers(r["candidate_answer"] for r in spoken_substantive)
         if adaptive_responses or not responses:
             batch_result = {"question_evaluations": adaptive_responses, "overall_summary": ""}
         else:
@@ -649,29 +815,40 @@ def complete_and_evaluate_interview(
                 evaluation_items=_legacy_evaluation_items(cur, interview_id, responses),
             )
         evaluations = list(batch_result.get("question_evaluations", []))
-        if ended_early:
-            # Each question never answered counts as 0, so ending early can
-            # never raise the average.
-            missing = max(0, interview["max_turns"] - len(evaluations))
-            evaluations += [{"answer_quality_score": 0, "communication_score": 0}] * missing
 
-        # Step C: Component scores and weighted overall score (scoring v2).
+        # Step B2: Integrity assessment and per-answer penalties (adaptive
+        # answers only; legacy sessions have no identity or signal data).
+        assessments, identity_summary = assessment.assess(cur, interview_id, adaptive_responses)
+        assessment.store(cur, adaptive_responses, assessments)
+        if adaptive_responses:
+            evaluations = [malpractice.apply_penalty(ev, assessments[ev["question_index"]])
+                           if ev.get("question_index") in assessments else ev for ev in evaluations]
+        # Questions never answered (ended early) are not padded with zeros:
+        # they already lower the completion ratio through max_turns.
+
+        # Step C: Component scores and weighted overall score (scoring v3).
+        # Averages describe the answers that were attempted; with none, 0.
+        scored = [ev for ev in evaluations if ev.get("question_index") in substantive_indexes]
         neutral = scoring.NEUTRAL_SCORE
-        answer_quality = scoring.average_score(
-            int(ev.get("answer_quality_score", neutral)) for ev in evaluations)
-        communication = scoring.average_score(
-            int(ev.get("communication_score", neutral)) for ev in evaluations)
-        criteria = scoring.average_criteria(ev.get("criteria_scores") for ev in evaluations)
+        if comp["answered"] == 0:
+            answer_quality = communication = 0
+            criteria = {name: 0 for name in gemini_service.CRITERIA_WEIGHTS}
+        else:
+            answer_quality = scoring.average_score(
+                int(ev.get("answer_quality_score", neutral)) for ev in scored)
+            communication = scoring.average_score(
+                int(ev.get("communication_score", neutral)) for ev in scored)
+            criteria = scoring.average_criteria(ev.get("criteria_scores") for ev in scored)
 
         # Speech: delivery measured from the audio when answers were spoken,
-        # otherwise the text-only filler estimate.
-        speech_summary = speech_analysis.summarize([r.get("speech_metrics") for r in responses])
-        if speech_summary and speech_summary.get("delivery_score") is not None:
-            fluency = speech_summary["delivery_score"]
-        elif not responses:
+        # otherwise the text-only filler estimate. Skips are left out.
+        speech_summary = speech_analysis.summarize([r.get("speech_metrics") for r in substantive])
+        if comp["answered"] == 0:
             fluency = None
+        elif speech_summary and speech_summary.get("delivery_score") is not None:
+            fluency = speech_summary["delivery_score"]
         else:
-            fluency = scoring.speech_fluency(filler_summary["total_fillers"], len(responses))
+            fluency = scoring.speech_fluency(filler_summary["total_fillers"], len(spoken_substantive))
 
         # Camera: mean of per-answer engagement; the browser's session
         # snapshot is only used for sessions without per-answer data.
@@ -685,58 +862,102 @@ def complete_and_evaluate_interview(
             vision_metrics = payload.vision_metrics or {}
             camera = scoring.camera_engagement(vision_metrics)
 
-        overall = scoring.overall_score(answer_quality, communication, camera, fluency)
+        weighted = scoring.overall_score(answer_quality, communication, camera, fluency)
+        overall = scoring.final_score(weighted, comp)
         weights = scoring.applied_weights(answer_quality, communication, camera, fluency)
 
-        # Integrity: reported beside the score, never folded into it.
+        # Integrity: proctoring summary, identity summary and the verdict.
+        # Penalties were applied per answer above; an invalid interview
+        # (identity not trustworthy) scores 0 overall.
         cur.execute(
             "SELECT event_type, duration_seconds FROM proctoring_events WHERE interview_id = %s;",
             (interview_id,),
         )
         integrity_summary = integrity.summarize(cur.fetchall(), vision_summary, ended_early)
+        decision = malpractice.verdict(list(assessments.values()), identity_summary["face_mismatch_events"],
+                                       integrity_summary["level"], len(adaptive_responses))
+        integrity_summary.update(decision, identity=identity_summary, score_before_integrity=overall)
+        if decision["verdict"] == "invalid":
+            overall = 0
 
         # Step D: One holistic pass over the whole transcript (adaptive
         # sessions; legacy batch grading already wrote a summary), then the
         # top unique strengths/improvements and the summary text.
         holistic = None
-        if adaptive_responses:
+        if adaptive_responses and comp["answered"] > 0:
             holistic = gemini_service.summarize_interview(
                 interview["role_title"], interview["job_description"],
                 [{"question": r["question_text"], "topic": r.get("topic"), "answer": r["candidate_answer"],
                   "answer_quality_score": r.get("answer_quality_score"),
-                  "criteria_scores": r.get("criteria_scores")} for r in adaptive_responses],
+                  "criteria_scores": r.get("criteria_scores")}
+                 for r in adaptive_responses if scoring.is_substantive(r)],
             )
         if holistic:
             batch_result = {**batch_result, "overall_summary": holistic["summary"],
                             "overall_strengths": holistic["strengths"],
                             "overall_improvements": holistic["improvements"]}
-        module_strengths, module_improvements = scoring.insights(criteria, speech_summary, vision_summary)
+        insufficient = comp["answered"] == 0
+        if insufficient:
+            # Nothing to praise or criticise in content, speech or criteria.
+            module_strengths, module_improvements = scoring.insights(None, None, vision_summary)
+            batch_result = {**batch_result, "overall_summary": "", "overall_strengths": [],
+                            "overall_improvements": []}
+            scored = []
+        else:
+            module_strengths, module_improvements = scoring.insights(criteria, speech_summary, vision_summary)
         strengths = list(batch_result.get("overall_strengths", [])) + module_strengths
         improvements = list(batch_result.get("overall_improvements", [])) + module_improvements
-        for ev in evaluations:
+        if insufficient:
+            improvements.append("Attempt every question; partial answers earn credit, skipped ones do not.")
+        for ev in scored:
             strengths.extend(ev.get("strengths") or [])
             improvements.extend(ev.get("improvements") or [])
         top_strengths = list(dict.fromkeys(strengths))[:5]
         top_improvements = list(dict.fromkeys(improvements))[:5]
         summary_feedback = (batch_result.get("overall_summary") or "").strip()
-        if not summary_feedback:
+        if insufficient:
+            summary_feedback = (
+                "Insufficient substantive responses were provided to evaluate interview performance. "
+                f"All {comp['total']} questions were skipped or left unanswered."
+            )
+            if camera is not None:
+                summary_feedback += f" Camera engagement was {camera}%."
+        elif not summary_feedback:
             camera_text = (f"camera engagement reached {camera}%" if camera is not None
                            else "camera engagement was not measured")
             if speech_summary and speech_summary.get("words_per_minute"):
-                speech_text = (f"You spoke at about {speech_summary['words_per_minute']} words per minute "
+                speech_text = (f" You spoke at about {speech_summary['words_per_minute']} words per minute "
                                f"with {speech_summary['fillers_per_minute']} filler words per minute.")
-            else:
-                speech_text = (f"Focus on reducing the {filler_summary['total_fillers']} filler words "
+            elif filler_summary["total_fillers"] > 0:
+                speech_text = (f" Focus on reducing the {filler_summary['total_fillers']} filler words "
                                "used across the session.")
+            else:
+                speech_text = ""
             summary_feedback = (
                 f"Overall score: {overall}/100. "
-                f"Answer quality averaged {answer_quality}% and {camera_text}. {speech_text}"
+                f"Answer quality averaged {answer_quality}% and {camera_text}.{speech_text}"
+            )
+        if 0 < comp["answered"] < comp["total"]:
+            summary_feedback += (
+                f" You answered {comp['answered']} of {comp['total']} questions; the overall score is "
+                f"scaled by your {comp['rate_percent']}% completion rate."
             )
         if ended_early:
             summary_feedback = (
-                "This interview ended early after repeated integrity violations "
-                "(leaving the interview window); unanswered questions were scored 0. "
-                + summary_feedback
+                ("This interview ended because the candidate stayed outside it for more than "
+                 f"{config.PROCTORING_MAX_AWAY_SECONDS} seconds; " if payload.end_reason == "away" else
+                 "This interview ended early after repeated integrity violations; ")
+                + "unanswered questions earn no credit. " + summary_feedback
+            )
+        if decision["verdict"] == "invalid":
+            summary_feedback = (
+                "This interview is invalid: the candidate's identity could not be confirmed "
+                "throughout, so the overall score is 0. " + summary_feedback
+            )
+        elif decision["answers_zeroed"] or decision["answers_capped"]:
+            summary_feedback = (
+                "Some answers showed signs of malpractice and were penalised; see the Integrity "
+                "section. " + summary_feedback
             )
 
         # Step E: Persist the report and close the interview.
@@ -769,10 +990,13 @@ def complete_and_evaluate_interview(
                 duration_seconds = %s,
                 completed_at = NOW(),
                 ended_early = %s,
-                end_reason = %s
+                end_reason = %s,
+                integrity_verdict = %s
             WHERE id = %s;
             """,
-            (overall, payload.duration_seconds, ended_early, "integrity" if ended_early else None, interview_id)
+            (overall, payload.duration_seconds, ended_early,
+             (payload.end_reason or "violations") if ended_early else None,
+             decision["verdict"], interview_id)
         )
 
     return completion_response({
@@ -787,7 +1011,7 @@ def complete_and_evaluate_interview(
         "criteria_scores": criteria, "speech_metrics": speech_summary,
         "vision_metrics": vision_metrics, "scoring_version": scoring.SCORING_VERSION,
         "scoring_weights": weights, "integrity": integrity_summary,
-    })
+    }, comp)
 
 
 # -------------------------------------------------------------
@@ -810,9 +1034,18 @@ def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.curren
         )
         events = [{**row, "label": integrity.LABELS.get(row["event_type"], row["event_type"]),
                    "major": row["event_type"] in integrity.MAJOR_EVENTS} for row in cur.fetchall()]
+        cur.execute(
+            """SELECT id, kind, question_index, recording_part, at_seconds, verdict, similarity, faces, image_name
+               FROM identity_checks WHERE interview_id = %s AND verdict NOT IN ('match', 'unavailable')
+               ORDER BY created_at LIMIT 60;""",
+            (interview_id,),
+        )
+        flagged_checks = [{**row, "id": str(row["id"])} for row in cur.fetchall()]
+        cur.execute("SELECT enrolled_at FROM identity_profiles WHERE interview_id = %s;", (interview_id,))
+        profile = cur.fetchone()
 
     return {
-        **completion_response(report),
+        **completion_response(report, scoring.completion(turns, interview["max_turns"])),
         # Raw columns kept for older clients that read them directly.
         "answer_quality_score": report["answer_quality_score"],
         "communication_score": report["communication_score"],
@@ -826,6 +1059,12 @@ def get_interview_report(interview_id: str, user: AuthUser = Depends(auth.curren
         "turns": turns,
         "proctoring_events": events,
         "ended_early": bool(interview.get("ended_early")),
+        "identity": {
+            "enrolled": bool(profile),
+            "photo": "enroll.jpg" if profile and os.path.isfile(
+                os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)), "identity", "enroll.jpg")) else None,
+            "flagged_checks": flagged_checks,
+        },
     }
 
 
@@ -843,7 +1082,7 @@ def get_user_interviews(firebase_uid: str, user: AuthUser = Depends(auth.current
         cur.execute(
             """
             SELECT id, role_title, interview_mode, status, duration_seconds, overall_score, created_at, completed_at,
-                   ended_early
+                   ended_early, integrity_verdict
             FROM interviews
             WHERE user_id = %s
             ORDER BY created_at DESC;
@@ -1016,12 +1255,10 @@ def record_proctoring_events(interview_id: str, payload: ProctoringBatch,
                              user: AuthUser = Depends(auth.current_user)):
     with transaction("Could not record the integrity event. Please retry.") as (_conn, cur):
         interview = owned_interview(cur, interview_id, user, lock=False)
-        if interview.get("interview_mode") == "game":
-            raise HTTPException(409, "Arena sessions are not proctored.")
         adaptive_service.require_active(interview)
         stored = 0
         for event in payload.events:
-            if event.type not in integrity.EVENT_TYPES:
+            if event.type not in integrity.CLIENT_EVENT_TYPES:
                 continue
             cur.execute(
                 """INSERT INTO proctoring_events
@@ -1041,6 +1278,378 @@ def record_proctoring_events(interview_id: str, payload: ProctoringBatch,
         summary = integrity.summarize(cur.fetchall())
     return {"stored": stored, "violations": summary["violations"],
             "max_violations": config.PROCTORING_MAX_VIOLATIONS}
+
+
+# -------------------------------------------------------------
+# BLOCK 13g: Identity verification (enrolment + face snapshots)
+# -------------------------------------------------------------
+# Enrolment (once, before the first question): one photo and a sentence
+# read aloud. Afterwards the browser sends a face snapshot every ~20 s and
+# whenever the camera picture changes; each is compared with the enrolled
+# face. Two mismatches in a row are a confirmed "different person" event.
+# Images are kept only as evidence (the enrolment photo and snapshots that
+# did not match) and are served to the owner only.
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+IDENTITY_IMAGE_PATTERN = re.compile(r"^(enroll|check_[0-9a-f-]{36})\.jpg$")
+SNAPSHOT_MIN_INTERVAL_SECONDS = 4.0
+_snapshot_times: dict[str, float] = {}
+_snapshot_lock = threading.Lock()
+
+
+def _identity_folder(interview_id: str) -> str:
+    folder = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)), "identity")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def _read_image(upload: UploadFile) -> bytes:
+    if not (upload.content_type or "").lower().startswith("image/"):
+        raise HTTPException(415, "Upload a JPEG or PNG image.")
+    data = upload.file.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, "Image is too large.")
+    return data
+
+
+def _proctored_interview(cur, interview_id: str, user: AuthUser):
+    interview = owned_interview(cur, interview_id, user, lock=False)
+    adaptive_service.require_active(interview)
+    return interview
+
+
+ENROLMENT_FACE_MESSAGES = {
+    "no_face": "We could not see your face. Sit facing the camera in good light and try again.",
+    "multiple_faces": "More than one face is visible. Only you should be in view; try again.",
+    "unclear": "Your face is too small, dark or blurred. Move closer to the camera in good light and try again.",
+}
+
+
+@app.post("/api/interviews/{interview_id}/identity/enroll")
+def enroll_identity(
+    interview_id: str,
+    photo: UploadFile = File(...),
+    audio: Optional[UploadFile] = File(None),
+    user: AuthUser = Depends(auth.current_user),
+):
+    with transaction("Could not prepare the identity check. Please retry.") as (_conn, cur):
+        _proctored_interview(cur, interview_id, user)
+        cur.execute("SELECT 1 FROM interview_responses WHERE interview_id = %s LIMIT 1;", (interview_id,))
+        if cur.fetchone():
+            raise HTTPException(409, "Identity can only be enrolled before the first answer.")
+    if not identity.enabled():
+        return {"available": False, "face": False, "voice": False, "enrolled": False}
+
+    image = identity.decode_image(_read_image(photo))
+    if image is None:
+        raise HTTPException(422, "The photo could not be read. Please try again.")
+    face_gallery, voice_gallery, voice_seconds = [], [], None
+    available = identity.status()
+    if available["face"]:
+        analysis = identity.analyze_face(image)
+        verdict = ("no_face" if analysis["faces"] == 0 else "multiple_faces" if analysis["faces"] > 1
+                   else None if analysis["quality_ok"] else "unclear")
+        if verdict:
+            raise HTTPException(422, ENROLMENT_FACE_MESSAGES[verdict])
+        face_gallery = [analysis["embedding"]]
+    if available["voice"] and audio is not None and audio.filename:
+        path = os.path.join(_identity_folder(interview_id), "enroll_audio.webm")
+        with open(path, "wb") as handle:
+            handle.write(audio.file.read(10 * 1024 * 1024))
+        try:
+            voice = identity.enrol_voice(path)
+        except Exception:
+            logger.exception("Voice enrolment failed")
+            voice = {"embedding": None, "speech_seconds": 0}
+        finally:
+            os.remove(path)
+        if voice["embedding"] is None:
+            raise HTTPException(422, "We could not hear enough of your voice. Read the sentence again, clearly.")
+        voice_gallery, voice_seconds = [voice["embedding"]], voice["speech_seconds"]
+
+    if face_gallery:
+        identity.save_jpeg(image, os.path.join(_identity_folder(interview_id), "enroll.jpg"))
+    with transaction("Could not save the identity check. Please retry.") as (_conn, cur):
+        cur.execute(
+            """INSERT INTO identity_profiles (interview_id, voice_embeddings, face_embeddings, voice_seconds)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (interview_id) DO UPDATE SET
+                 voice_embeddings = EXCLUDED.voice_embeddings, face_embeddings = EXCLUDED.face_embeddings,
+                 voice_seconds = EXCLUDED.voice_seconds, enrolled_at = NOW();""",
+            (interview_id, json.dumps(voice_gallery), json.dumps(face_gallery), voice_seconds),
+        )
+    return {"available": True, "face": bool(face_gallery), "voice": bool(voice_gallery), "enrolled": True}
+
+
+@app.post("/api/interviews/{interview_id}/identity/snapshot")
+def identity_snapshot(
+    interview_id: str,
+    photo: UploadFile = File(...),
+    question_index: Optional[int] = Form(None, ge=1, le=50),
+    part: Optional[int] = Form(None, ge=1, le=50),
+    at: Optional[float] = Form(None, ge=0, le=24 * 60 * 60),
+    user: AuthUser = Depends(auth.current_user),
+):
+    with transaction("Could not check the camera image. Please retry.") as (_conn, cur):
+        _proctored_interview(cur, interview_id, user)
+        cur.execute("SELECT face_embeddings FROM identity_profiles WHERE interview_id = %s;", (interview_id,))
+        profile = cur.fetchone()
+    if not profile or not profile["face_embeddings"] or not identity.enabled():
+        return {"verdict": "unavailable", "event": None}
+
+    key = str(uuid.UUID(interview_id))
+    with _snapshot_lock:
+        now = time.monotonic()
+        if now - _snapshot_times.get(key, 0.0) < SNAPSHOT_MIN_INTERVAL_SECONDS:
+            raise HTTPException(429, "Snapshots are too frequent.")
+        _snapshot_times[key] = now
+
+    image = identity.decode_image(_read_image(photo))
+    if image is None:
+        raise HTTPException(422, "The image could not be read.")
+    try:
+        check = identity.check_face(image, list(profile["face_embeddings"]))
+    except identity.IdentityUnavailable:
+        return {"verdict": "unavailable", "event": None}
+    embedding = check.pop("embedding", None)
+
+    with transaction("Could not save the camera check. Please retry.") as (_conn, cur):
+        cur.execute("SELECT face_embeddings FROM identity_profiles WHERE interview_id = %s FOR UPDATE;",
+                    (interview_id,))
+        gallery = list(cur.fetchone()["face_embeddings"] or [])
+        cur.execute(
+            """SELECT verdict, details FROM identity_checks WHERE interview_id = %s AND kind = 'face'
+               ORDER BY created_at DESC LIMIT 1;""",
+            (interview_id,),
+        )
+        previous = cur.fetchone()
+        streak = 1
+        if previous and previous["verdict"] == check["verdict"]:
+            streak = int((previous["details"] or {}).get("streak", 1)) + 1
+        check["streak"] = streak
+
+        check_id = str(uuid.uuid4())
+        image_name = None
+        if check["verdict"] not in ("match", "unavailable"):
+            image_name = f"check_{check_id}.jpg"
+            identity.save_jpeg(image, os.path.join(_identity_folder(interview_id), image_name))
+        cur.execute(
+            """INSERT INTO identity_checks
+               (id, interview_id, kind, question_index, recording_part, at_seconds, verdict,
+                similarity, faces, image_name, details)
+               VALUES (%s, %s, 'face', %s, %s, %s, %s, %s, %s, %s, %s);""",
+            (check_id, interview_id, question_index, part, at, check["verdict"], check.get("similarity"),
+             check.get("faces"), image_name, json.dumps(check)),
+        )
+
+        # Two in a row confirms it; one event per streak.
+        event = None
+        if streak == 2 and check["verdict"] in ("mismatch", "multiple_faces"):
+            event = "face_mismatch" if check["verdict"] == "mismatch" else "extra_person"
+            _server_event(cur, interview_id, f"face-{check_id}", event, question_index,
+                          {"similarity": check.get("similarity"), "faces": check.get("faces"),
+                           "image": image_name})
+            cur.execute("UPDATE proctoring_events SET recording_part = %s, at_seconds = %s "
+                        "WHERE interview_id = %s AND client_event_id = %s;",
+                        (part, at, interview_id, f"face-{check_id}"))
+        elif check["verdict"] == "match":
+            grown = identity.grow_gallery(gallery, embedding, check.get("similarity"),
+                                          identity.FACE_GALLERY_ADD_SIMILARITY)
+            if len(grown) != len(gallery):
+                cur.execute("UPDATE identity_profiles SET face_embeddings = %s WHERE interview_id = %s;",
+                            (json.dumps(grown), interview_id))
+        violations = _violation_count(cur, interview_id)
+
+    return {
+        "verdict": check["verdict"], "similarity": check.get("similarity"), "faces": check.get("faces"),
+        "event": {"type": event, "label": integrity.LABELS[event]} if event else None,
+        "violations": violations, "max_violations": config.PROCTORING_MAX_VIOLATIONS,
+    }
+
+
+@app.get("/api/interviews/{interview_id}/identity/images/{name}")
+def identity_image(interview_id: str, name: str, user: AuthUser = Depends(auth.current_user)):
+    """Owner-only enrolment photo or flagged snapshot."""
+    if not IDENTITY_IMAGE_PATTERN.match(name):
+        raise HTTPException(404, "Image not found.")
+    with transaction("Could not load this image. Please retry.") as (_conn, cur):
+        owned_interview(cur, interview_id, user, lock=False)
+    path = os.path.join(UPLOAD_DIR, str(uuid.UUID(interview_id)), "identity", name)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Image not found.")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+# -------------------------------------------------------------
+# BLOCK 13h: Coding round (VPL)
+# -------------------------------------------------------------
+# Run: the visible examples (and optionally the candidate's own input) with
+# their expected output. Submit: every test, visible and hidden, then the AI
+# code review; stored like any other answer, then /next-question as usual.
+# Code never runs while a database transaction is open.
+class CodeRequest(BaseModel):
+    question_index: int = Field(ge=1, le=50)
+    language: Literal["python", "javascript", "cpp", "java"]
+    code: str = Field(max_length=code_runner.MAX_CODE_BYTES)
+    custom_input: Optional[str] = Field(default=None, max_length=20000)
+    answer_signals: Optional[dict] = None
+
+
+MAX_RUNS_PER_QUESTION = 40
+RUN_MIN_INTERVAL_SECONDS = 1.5
+_runs: dict[tuple, list] = {}
+_runs_lock = threading.Lock()
+
+
+def _coding_question(cur, interview_id: str, question_index: int, user: AuthUser):
+    interview = owned_interview(cur, interview_id, user, lock=False)
+    question = adaptive_service.question_for_submission(cur, interview, question_index)
+    if question.get("kind") != "coding" or not question.get("coding_private"):
+        raise HTTPException(409, "This question is not a coding question.")
+    return interview, question
+
+
+@app.get("/api/coding/languages")
+def coding_languages(user: AuthUser = Depends(auth.current_user)):
+    return code_runner.available_languages()
+
+
+@app.post("/api/interviews/{interview_id}/code/run")
+def run_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depends(auth.current_user)):
+    with transaction("Could not run the code. Please retry.") as (_conn, cur):
+        _interview, question = _coding_question(cur, interview_id, payload.question_index, user)
+    key = (str(uuid.UUID(interview_id)), payload.question_index)
+    with _runs_lock:
+        history = _runs.setdefault(key, [0, 0.0])
+        if time.monotonic() - history[1] < RUN_MIN_INTERVAL_SECONDS:
+            raise HTTPException(429, "Wait a moment before running again.")
+        if history[0] >= MAX_RUNS_PER_QUESTION:
+            raise HTTPException(429, "Run limit reached for this question; submit your solution.")
+        history[0] += 1
+        history[1] = time.monotonic()
+
+    tests = coding.examples_for(question["coding"])
+    if payload.custom_input is not None:
+        tests.append({"input": payload.custom_input,
+                      "expected": coding.custom_expected(question["coding_private"], payload.custom_input)})
+    try:
+        run = code_runner.run_tests(payload.language, payload.code, tests)
+    except code_runner.RunnerError as err:
+        raise HTTPException(503 if "unavailable" in str(err) else 422, str(err))
+    results = [{**result, "input": test["input"], "expected": test["expected"],
+                "custom": index >= len(question["coding"].get("examples") or [])}
+               for index, (test, result) in enumerate(zip(tests, run["results"]))]
+    return {"compiled": run["compiled"], "compile_output": run["compile_output"], "results": results,
+            "runs_left": MAX_RUNS_PER_QUESTION - _runs[key][0]}
+
+
+@app.post("/api/interviews/{interview_id}/code/submit")
+def submit_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depends(auth.current_user)):
+    # Step A: validate without holding a lock; replay an accepted submission.
+    with transaction("Could not submit the code. Please retry.") as (_conn, cur):
+        cur.execute("SELECT * FROM interview_questions WHERE interview_id = %s AND question_index = %s;",
+                    (interview_id, payload.question_index))
+        existing_question = cur.fetchone()
+        owned_interview(cur, interview_id, user, lock=False)
+        if existing_question:
+            previous = adaptive_service.existing_submission(cur, existing_question)
+            if previous:
+                return {**adaptive_service.submission_result(previous), "coding": _public_coding(previous)}
+        _interview, question = _coding_question(cur, interview_id, payload.question_index, user)
+
+    # Step B: run every test and review the code (no database work).
+    tests = coding.tests_for(question["coding_private"])
+    try:
+        run = code_runner.run_tests(payload.language, payload.code, tests)
+    except code_runner.RunnerError as err:
+        raise HTTPException(503 if "unavailable" in str(err) else 422, str(err))
+    evaluation = coding.grade({**question["coding"]}, payload.language, payload.code, run,
+                              len(question["coding"].get("examples") or []))
+
+    # Step C: store under the interview lock (a concurrent retry wins once).
+    with transaction("Could not save the coding answer. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user)
+        question = adaptive_service.question_for_submission(cur, interview, payload.question_index)
+        previous = adaptive_service.existing_submission(cur, question)
+        if previous:
+            return {**adaptive_service.submission_result(previous), "coding": _public_coding(previous)}
+        answer = f"[{payload.language}]\n{payload.code}"
+        response = adaptive_service.insert_response(
+            cur, interview, question, answer, evaluation,
+            fillers=nlp_evaluator.count_filler_words(""), answer_signals=malpractice.sanitize_signals(payload.answer_signals),
+        )
+        return {**adaptive_service.submission_result(response), "coding": _public_coding(response)}
+
+
+def _public_coding(response) -> dict:
+    """Test counts shown after a submission (no hidden inputs or outputs)."""
+    result = response.get("coding_result") or {}
+    return {key: result.get(key) for key in ("passed", "total", "compiled", "examples_passed",
+                                              "hidden_passed", "language")}
+
+
+# -------------------------------------------------------------
+# BLOCK 13i: Arena ranking
+# -------------------------------------------------------------
+class ArenaEndRequest(BaseModel):
+    reason: Literal["away", "violations"]
+
+
+@app.post("/api/interviews/{interview_id}/arena-end")
+def arena_end(interview_id: str, payload: ArenaEndRequest, user: AuthUser = Depends(auth.current_user)):
+    """End a ranked Arena early: unplayed levels score 0 and the rating drops."""
+    with transaction("Could not end the Arena. Please retry.") as (_conn, cur):
+        interview = owned_interview(cur, interview_id, user)
+        arena.require_game(interview)
+        if interview["status"] == "in_progress":
+            arena.finalize(cur, interview, end_reason=payload.reason)
+            interview = owned_interview(cur, interview_id, user)
+        return arena.results(cur, interview)
+
+
+@app.get("/api/arena/leaderboard")
+def arena_leaderboard(category: str = ranking.OVERALL, limit: int = 50,
+                      user: AuthUser = Depends(auth.current_user)):
+    if category != ranking.OVERALL and category not in ranking.CATEGORIES:
+        raise HTTPException(404, "Unknown category.")
+    limit = max(1, min(limit, 100))
+    with transaction("Could not load the leaderboard. Please retry.") as (_conn, cur):
+        rows = ranking.leaderboard(cur, category, limit)
+        cur.execute("SELECT id FROM users WHERE firebase_uid = %s;", (user.uid,))
+        me = cur.fetchone()
+        standing = ranking.rank(cur, me["id"], category) if me else {"rank": None, "total": 0, "rating": None}
+    return {
+        "category": category,
+        "categories": [{"id": key, "label": label} for key, label in ranking.LABELS.items()],
+        "rows": [{"rank": row["rank"], "name": ranking.display_name(row), "rating": row["rating"],
+                  "games": row["games"], "best_rating": row["best_rating"],
+                  "is_me": row["firebase_uid"] == user.uid} for row in rows],
+        "me": standing,
+    }
+
+
+@app.get("/api/arena/me")
+def arena_me(user: AuthUser = Depends(auth.current_user)):
+    with transaction("Could not load your ranking. Please retry.") as (_conn, cur):
+        cur.execute("SELECT id FROM users WHERE firebase_uid = %s;", (user.uid,))
+        me = cur.fetchone()
+        if not me:
+            return {"ratings": [], "recent": []}
+        cur.execute("SELECT category, rating, games, best_rating FROM user_ratings WHERE user_id = %s;", (me["id"],))
+        ratings = []
+        for row in cur.fetchall():
+            standing = ranking.rank(cur, me["id"], row["category"])
+            ratings.append({**row, "label": ranking.LABELS.get(row["category"], row["category"]),
+                            "rank": standing["rank"], "total": standing["total"]})
+        ratings.sort(key=lambda r: (r["category"] != ranking.OVERALL, r["label"]))
+        cur.execute(
+            """SELECT e.category, e.change, e.rating_after, e.details, e.created_at, e.interview_id, i.role_title
+               FROM rating_events e LEFT JOIN interviews i ON i.id = e.interview_id
+               WHERE e.user_id = %s ORDER BY e.created_at DESC LIMIT 20;""",
+            (me["id"],),
+        )
+        recent = [{**row, "interview_id": str(row["interview_id"]) if row["interview_id"] else None,
+                   "label": ranking.LABELS.get(row["category"], row["category"])} for row in cur.fetchall()]
+    return {"ratings": ratings, "recent": recent}
 
 
 # -------------------------------------------------------------
@@ -1132,6 +1741,8 @@ def get_interview_state(interview_id: str, user: AuthUser = Depends(auth.current
             (interview_id,),
         )
         violations = integrity.summarize(cur.fetchall())["violations"]
+        cur.execute("SELECT 1 FROM identity_profiles WHERE interview_id = %s;", (interview_id,))
+        enrolled = cur.fetchone() is not None
 
     current = next((r for r in responses if r["question_index"] == interview["current_turn"]), None)
     final_turn = interview["current_turn"] >= interview["max_turns"]
@@ -1157,8 +1768,11 @@ def get_interview_state(interview_id: str, user: AuthUser = Depends(auth.current
         "recording_parts": recording_parts(interview_id),
         "proctoring": {
             "max_violations": config.PROCTORING_MAX_VIOLATIONS,
+            "max_away_seconds": config.PROCTORING_MAX_AWAY_SECONDS,
             "violations": violations,
         },
+        "coding_round": bool(interview.get("coding_round")),
+        "identity": {"enabled": identity.enabled(), "enrolled": enrolled},
     }
 
 
@@ -1296,6 +1910,9 @@ def health():
             "voice": config.PIPER_VOICE if config.TTS_PROVIDER == "piper" else None,
             "loaded": tts_service.is_loaded(),
         },
+        # Which identity checks this server can run (voice, face).
+        "identity": identity.status(),
+        "coding_languages": [item["id"] for item in code_runner.available_languages()],
     }
 
 

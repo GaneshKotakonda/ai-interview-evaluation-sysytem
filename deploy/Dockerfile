@@ -28,6 +28,11 @@ ENV PIPER_VOICE=${PIPER_VOICE} \
     TTS_CACHE_DIR=/app/backend/tts_cache
 RUN python -m piper.download_voices "${PIPER_VOICE}" --download-dir /models/piper
 
+# Identity-verification models (speaker + face), checksum-verified.
+ENV IDENTITY_MODEL_DIR=/models/identity
+COPY backend/config.py backend/download_models.py /tmp/models/
+RUN python /tmp/models/download_models.py && rm -rf /tmp/models
+
 COPY backend/ ./backend/
 COPY schema.sql ./schema.sql
 

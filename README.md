@@ -8,14 +8,17 @@ IntervueAI is an interview-coaching platform that evaluates each response before
 - **Dynamic Difficulty:** Deterministic transitions across Easy, Medium, Hard, and Expert.
 - **AI Follow-ups:** A partial answer can produce one contextual follow-up; consecutive follow-ups are blocked.
 - **Voice Interview:** One click starts the interview. Questions are read aloud by an open-source neural voice ([Piper](https://github.com/OHF-Voice/piper1-gpl)); the candidate answers out loud; the interview moves on after Next or a natural pause; the whole session is recorded. Scores stay hidden until the final report. A typed mode remains for accessibility.
-- **Proctoring:** The interview runs in fullscreen. Leaving it (another tab, window or app) shows a blocking warning and is recorded with its duration; copy, paste, right-click and inspection shortcuts are blocked; a second display is flagged; camera signals add extra-face and out-of-frame events. After the configured number of violations (default 5) the interview ends and unanswered questions score 0. The report has an Integrity section with a timeline linked to the recording.
+- **Proctoring:** The interview runs in fullscreen. Leaving it (another tab, window or app) shows a blocking warning and is recorded with its duration; copy, paste, right-click and inspection shortcuts are blocked; a second display is flagged; camera signals add extra-face and out-of-frame events. Staying outside the interview for 5 seconds ends it at once, and 3 warnings end it too; unanswered questions then score 0. The rules (alone, no AI, stay on screen) are read aloud before the interview starts, and the sidebar is hidden while it runs. The report has an Integrity section with a timeline linked to the recording.
+- **Malpractice detection and identity checks:** At the start the candidate enrols (a photo and one sentence read aloud). Every spoken answer is compared with the enrolled voice, including windows inside the answer, and face snapshots every 20 seconds are compared with the enrolled face (open-source models on the server: NVIDIA NeMo TitaNet-small through sherpa-onnx, OpenCV YuNet + SFace). In the browser, an object detector spots other people, phones and books; the camera checks for a missing face, a covered or frozen image and virtual cameras; speech while the candidate's lips are still is flagged; typed answers that appear without being typed are flagged. Reading a prepared or AI-generated answer is estimated from eye movements (line sweeps), speech rhythm, response latency and the wording (Gemini). Serious events warn the candidate and count as violations. At the end each answer can be scored 0 (another person answered) or capped at 40 (assisted), and the interview gets a verdict: Clean, Needs review or Invalid (score 0).
+- **Coding round (built-in VPL):** For coding roles, questions 2 and 4 open a Virtual Programming Lab: problem statement, worked examples, a CodeMirror editor (Python, JavaScript, C++, Java), Run on the examples or your own input, and Submit on hidden tests (edge cases and large inputs). 15 verified problems whose expected outputs come from reference solutions; when a candidate has seen them all, Gemini writes new ones that are only used after the server checks them. Score: 70% tests, 30% AI review of efficiency and code quality. Code runs in a locked-down runner container in production.
+- **Strict grading:** calibrated score bands, caps for keyword-only or textbook answers, and deterministic caps for very short, off-topic or largely incorrect answers.
 - **Speech-to-Text:** Answers are transcribed on the server with open-source [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT), primed with the question for technical vocabulary and filtered for silence hallucinations.
 - **Multi-criteria Evaluation:** Gemini + RAG score correctness, completeness, technical depth and relevance; answer quality is their documented weighted mean.
 - **Speech Delivery:** Pace (words per minute), filler words per minute and long pauses measured from Whisper word timestamps.
 - **Camera Engagement per Answer:** MediaPipe face presence, screen gaze and head alignment, blended into one score and recorded for every answer.
 - **Explainable Scoring v2:** The report shows each component, the four criteria, delivery and camera summaries, and the exact weights used.
 - **Answer Playback & Resume:** Owners can replay recordings from the report; a reload mid-interview resumes where it stopped.
-- **Interview Arena:** Separate practice mode with deterministic XP, streaks, one hint, levels, and a Boss Round.
+- **Ranked Interview Arena:** Game mode with XP, streaks, one hint, levels, coding challenges and a Boss Round, proctored like an interview. A LeetCode-style rating (start 1500) gives an overall rank and a rank per category (Frontend, Backend, Java, SQL, DSA, …) on the leaderboard; integrity warnings and leaving the game cost rating points.
 - **Explainable Reports:** Shows the adaptive journey, answer-quality scores, and adaptation outcomes.
 - **Real Performance History:** PostgreSQL-backed dashboard and saved interview history.
 
@@ -77,7 +80,7 @@ Copy `.env.example` to `.env` for the frontend and `backend/.env.example` to `ba
 
 Check the running API at `http://localhost:8000/api/health`; it reports whether PostgreSQL is reachable, whether a Gemini key is configured and whether the speech-to-text model is loaded.
 
-For production hosting see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (Firebase Hosting + one Docker Compose server).
+Teammates setting it up on their own computer with a local database: follow [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md). For production hosting see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (Firebase Hosting + one Docker Compose server).
 
 ### Tests
 
@@ -152,14 +155,16 @@ Follow-up controls prevent more than one consecutive follow-up. Arena XP, streak
 - When the camera model produces no data, Camera Engagement is omitted and the overall score is re-weighted over the other components; no value is assumed.
 - Every API call except `/api/health` must carry the signed-in user's Firebase ID token (`Authorization: Bearer …`); the backend verifies it against Google's signing certificates and only lets users read or change their own interviews and account. Uploaded answer videos are stored on the server's disk and are not served over HTTP.
 - A reload resumes an active Standard interview (the recording continues as a new part); an Arena game in progress cannot be resumed (its results reload once finished).
-- Proctoring detects leaving the interview window, not applications running in the background or a second device such as a phone; a web page cannot see those. Integrity is reported beside the score, not mixed into it. Operating-system lockdown (Safe Exam Browser) is planned for version 2.
+- Proctoring detects leaving the interview window, not applications running in the background; a phone is only detected when it is visible to the camera. Operating-system lockdown (Safe Exam Browser) is planned for version 2.
+- Identity and reading detection are statistical. Thresholds were calibrated on real recordings and need two consecutive face mismatches, or independent evidence for reading, before penalising; inconclusive results are shown for review only. A human should review any "Invalid" or "Needs review" report before acting on it.
+- Face snapshots are stored only when they did not match (as evidence), and the enrolment voice sample is deleted once its voiceprint is computed.
 - Voice mode needs a reasonably quiet room: background conversation can be transcribed as part of an answer. Readiness measures room noise and the report flags answers that look unrelated to the question.
 - Piper is GPL-3.0 licensed; running it on our own server is fine, but redistributing a modified Piper would require sharing that source.
 - The system supports coaching and self-practice, not hiring decisions.
 
 ## Future Work
 
-**Version 2:** a coding round with VPL (Virtual Programming Lab): in-browser editor, sandboxed execution and test-case grading, with Safe Exam Browser lockdown. Other extensions include acoustic (tone/pitch) analysis, resume-driven interviews, a skill knowledge graph, Arena session recovery, coding challenges, and GPU-accelerated transcription for larger deployments.
+**Version 2:** Safe Exam Browser lockdown (blocks other applications at the operating-system level), more coding languages and problem types, and teacher dashboards for the Arena rankings. Other extensions include acoustic (tone/pitch) analysis, resume-driven interviews, a skill knowledge graph, Arena session recovery, coding challenges, and GPU-accelerated transcription for larger deployments.
 
 ## Project Structure
 
@@ -171,12 +176,22 @@ backend/
   adaptive.py          deterministic difficulty and follow-up policy
   adaptive_service.py  adaptive state and persistence
   adaptive_questions.py question validation and offline fallback questions
-  arena.py             deterministic Arena rules
+  arena.py             deterministic Arena rules and the ranked finish
+  ranking.py           LeetCode-style ratings, ranks, leaderboard
+  coding.py            coding round: turns, problem choice, grading
+  coding_bank.py       15 verified coding problems with test generators
+  coding_ai.py         AI-generated problems, accepted only after validation
+  code_runner.py       runs code against tests (time/output limits)
+  runner_service.py    the isolated runner container's API
+  assessment.py        per-answer integrity assessment (interviews and Arena)
   scoring.py           final-report scoring rules
   nlp_evaluator.py     filler words and rubric retrieval
   stt_service.py       speech-to-text (faster-whisper, Gemini fallback)
   tts_service.py       spoken questions (Piper neural voice, cached)
   integrity.py         proctoring event rules and integrity summary
+  identity.py          voice + face verification against the enrolment
+  malpractice.py       reading detection, per-answer penalties, verdict
+  download_models.py   fetches the identity models (checksum-verified)
   speech_analysis.py   pace, filler and pause metrics
   gemini_service.py    Gemini and embedding integration
   database.py          PostgreSQL connections

@@ -35,15 +35,18 @@ class ScoringRuleTests(unittest.TestCase):
 
     def test_overall_score_drops_missing_camera_weight(self):
         self.assertEqual(scoring.overall_score(80, 80, 80, 80), 80)
-        # 0.40*90 + 0.25*70 + 0.15*80 = 65.5 over a weight of 0.80 -> 81.875
-        self.assertEqual(scoring.overall_score(90, 70, None, 80), 82)
+        # 0.70*90 + 0.15*70 + 0.10*80 = 81.5 over a weight of 0.95 -> 85.8
+        self.assertEqual(scoring.overall_score(90, 70, None, 80), 86)
+        self.assertEqual(scoring.overall_score(100, 0, 0, 0), 70)
+        self.assertEqual(scoring.WEIGHTS, {"answer_quality": 0.70, "communication": 0.15,
+                                           "speech_fluency": 0.10, "camera_engagement": 0.05})
 
     def test_speech_fluency_is_normalised_per_answer(self):
         self.assertEqual(scoring.speech_fluency(0, 5), 95)
         self.assertEqual(scoring.speech_fluency(10, 5), 91)  # 2 fillers per answer
         self.assertEqual(scoring.speech_fluency(10, 1), 75)
         self.assertEqual(scoring.speech_fluency(500, 1), 50)
-        self.assertEqual(scoring.speech_fluency(0, 0), 95)
+        self.assertIsNone(scoring.speech_fluency(0, 0))
 
     def test_filler_aggregation_and_average(self):
         summary = scoring.aggregate_fillers(["Um, like, I think", None, "you know, um"])
@@ -153,8 +156,16 @@ class ServiceFixTests(unittest.TestCase):
     def test_batch_evaluation_without_api_key_uses_local_fallback(self):
         with patch.object(config, "GEMINI_API_KEY", ""):
             result = gemini_service.batch_evaluate_interview("Engineer", None, [
-                {"question_index": 1, "similarity_score": 0.9, "filler_count": 0}])
+                {"question_index": 1, "candidate_answer": "A real answer about indexes",
+                 "similarity_score": 0.9, "filler_count": 0}])
         self.assertEqual(result["question_evaluations"][0]["answer_quality_score"], 90)
+
+    def test_batch_fallback_gives_empty_answers_zero_not_forty(self):
+        with patch.object(config, "GEMINI_API_KEY", ""):
+            result = gemini_service.batch_evaluate_interview("Engineer", None, [
+                {"question_index": 1, "candidate_answer": "", "similarity_score": 0.0, "filler_count": 0},
+                {"question_index": 2, "candidate_answer": "Skip.", "similarity_score": 0.0, "filler_count": 0}])
+        self.assertEqual([e["answer_quality_score"] for e in result["question_evaluations"]], [0, 0])
 
     def test_rubric_search_casts_vector_to_float8_array(self):
         class RubricCursor(FakeCursor):

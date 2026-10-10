@@ -8,12 +8,16 @@ How and where to run the AI Interview Evaluation System in production. Status: *
 - Adaptive Standard interview, spoken end to end: Piper reads every question, the candidate answers out loud (typed mode for accessibility), faster-whisper transcribes, Gemini grades each answer silently on four criteria, and one holistic review writes the final summary.
 - Whole-interview recording with chunked upload, resume after reload, and playback in the report.
 - Proctoring: fullscreen enforcement, detection of leaving the interview (tab, window or app), blocked copy/paste/right-click and inspection shortcuts, second-display check, camera signals (extra faces, out of frame); automatic end after the configured number of violations; integrity section in the report.
-- Interview Arena, history, reports, profile, Firebase sign-in with server-side token checks.
+- Identity and malpractice detection: enrolment (photo + sentence read aloud), voice check on every answer, face checks every 20 s, other people/phones/books in view, speech without lip movement, covered/frozen/virtual cameras, injected typed text, reading-detection; per-answer penalties (0 or capped at 40) and a Clean / Needs review / Invalid verdict.
+- Stricter grading: calibrated bands and caps for short, off-topic, incorrect or keyword-only answers.
+- Coding round with the built-in VPL: editor, examples, hidden tests, 70% tests + 30% AI code review; code runs in the isolated `runner` container.
+- Ranked Interview Arena: proctored, LeetCode-style rating with overall and category ranks, leaderboard, rating penalties for integrity warnings and leaving.
+- Rules read aloud before every session; 3 warnings or 5 seconds away end it; sidebar hidden during sessions; 3-second silence moves to the next question.
+- History, reports, profile, Firebase sign-in with server-side token checks.
 
-### Version 2 (planned): coding round with VPL
-- A coding round of programming questions in the interview, built on **VPL (Virtual Programming Lab)**: an in-browser code editor plus sandboxed compilation, execution and automatic test-case grading (the VPL Jail server).
-- Integration plan: generate coding tasks and hidden test cases from the role and job description; run submissions in the isolated VPL execution server, never on the API server; combine test results with the AI review of code quality into the report.
-- Stronger lockdown for the coding round: VPL works with **Safe Exam Browser**, which can block other applications at the operating-system level (beyond what a web page can detect).
+### Version 2 (planned)
+- **Safe Exam Browser** lockdown, which can block other applications at the operating-system level (beyond what a web page can detect).
+- More coding languages and problem types (SQL queries, multi-file projects), and teacher dashboards for Arena rankings.
 
 ## 1. Recommended setup
 
@@ -37,6 +41,8 @@ flowchart LR
 | Database | **PostgreSQL 16 container** on the same VM | Matches the schema and transactions the app is built on; not exposed to the internet |
 | Recordings | Docker volume on the VM, uploaded in 10-second chunks during the interview and served only to the owner | Private by design; no extra storage service |
 | Speech | faster-whisper (speech-to-text) and Piper (spoken questions), both baked into the image | No per-minute fees; audio never leaves the server |
+| Code runner | Separate `runner` container: g++, Node.js, JDK, Python | Candidates' code never runs in the API container; no internet, read-only filesystem, CPU/memory/process limits |
+| Identity | TitaNet-small speaker model (sherpa-onnx) and OpenCV YuNet + SFace face models, downloaded at image build | Voice and face checks run on the server; no biometric data leaves it |
 | HTTPS for the API | **Caddy** container | Gets and renews Let's Encrypt certificates automatically |
 
 ### Why not a free serverless tier
@@ -76,7 +82,7 @@ Create an **A record** `api.yourdomain.com → <server IP>` (skip this when usin
 git clone https://github.com/GaneshKotakonda/ai-interview-evaluation-sysytem.git
 cd ai-interview-evaluation-sysytem/deploy
 cp .env.example .env
-nano .env        # API_DOMAIN, CORS_ORIGINS, POSTGRES_PASSWORD, GEMINI_API_KEY
+nano .env        # API_DOMAIN, CORS_ORIGINS, POSTGRES_PASSWORD, GEMINI_API_KEY, RUNNER_TOKEN
 chmod 600 .env
 docker compose up -d --build
 docker compose logs -f api    # wait for "Application startup complete"
@@ -111,10 +117,12 @@ Firebase console → Authentication → Settings → **Authorised domains**: `ai
 2. Readiness: the mic meter moves, **Test speakers** plays the interviewer voice, consent and continue.
 3. Run a Standard interview by voice: each question is spoken, answers end with **Next Question** or a pause, and the interview finishes with the closing message.
 4. Proctoring: during an interview press Alt+Tab (or switch tab) and confirm the "You left the interview" warning, then return; in a second interview repeat until the limit ends it.
-5. Open the report: criteria, delivery, camera summary, **Integrity** section, and the interview recording with "Play this answer".
-6. Reload the page in the middle of an interview: it resumes.
-7. Play an Arena session to the Boss Round.
-8. `docker compose logs api` shows no errors.
+5. Identity: the identity check appears after Start; let a second person sit in view, hold up a phone, and let someone else answer one question. Each shows a warning, and the report shows the verdict, the flagged snapshots and the penalised answer.
+6. Open the report: criteria, delivery, camera summary, **Integrity** section, and the interview recording with "Play this answer".
+7. Reload the page in the middle of an interview: it resumes without a second identity check.
+8. Coding round: on a coding role, question 2 opens the code editor; Run shows the examples, Submit grades hidden tests.
+9. Play a ranked Arena to the Boss Round; the result shows the rating change; the Leaderboard lists you.
+10. `docker compose logs api runner` shows no errors and `/api/health` reports `"identity": {"voice": true, "face": true}`.
 
 ## 4. Updating
 ```bash
@@ -147,6 +155,7 @@ docker compose exec api find backend/uploads -type f -mtime +60 -delete
 - [ ] SSH uses keys only (`PasswordAuthentication no`).
 - [ ] `CORS_ORIGINS` lists only the real frontend origins.
 - [ ] Every API call is authenticated with Firebase ID tokens (already enforced) and recordings are owner-only (already enforced).
+- [ ] `RUNNER_TOKEN` is a long random string; the `runner` service stays on the internal network only.
 - [ ] Restrict the Gemini API key in Google Cloud to the Generative Language API.
 - [ ] `sudo apt upgrade` monthly; `docker compose pull && docker compose up -d` for base images.
 
@@ -158,9 +167,11 @@ docker compose exec api find backend/uploads -type f -mtime +60 -delete
 | Better transcript accuracy | 4 vCPU / 8 GB | `small.en` |
 | Many concurrent users | Add a GPU host or set `STT_PROVIDER=gemini` | — |
 
+Identity models add about 70 MB to the image and about 300 MB of RAM; a voice check takes under a second per answer and a face check about 50 ms.
+
 Transcription runs one answer at a time per server (by design). On 2 vCPUs, `base.en` handles a one-minute answer in a few seconds, and Piper speaks a question in well under a second (cached afterwards). A 10-minute interview recording is roughly 75 MB at the default bitrate; plan disk space accordingly.
 
-**Licences:** faster-whisper is MIT. Piper is GPL-3.0: running it as part of a hosted service is fine; only redistributing modified Piper code would require publishing that code.
+**Licences:** faster-whisper is MIT. Piper is GPL-3.0: running it as part of a hosted service is fine; only redistributing modified Piper code would require publishing that code. sherpa-onnx and the OpenCV Zoo face models are Apache-2.0. The TitaNet-small speaker model is published by NVIDIA under CC-BY-4.0 (attribution required); check its model card before commercial use.
 
 ## 9. Managed alternative (no server administration)
 - **API:** Render "Web Service" from `deploy/Dockerfile` on a 2 GB plan, with a persistent disk mounted at `/app/backend/uploads`.

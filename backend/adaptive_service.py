@@ -16,8 +16,10 @@ import uuid
 from fastapi import HTTPException
 
 import arena
+import coding
 import gemini_service
 import nlp_evaluator
+import resume
 from adaptive import adaptation_for
 
 logger = logging.getLogger(__name__)
@@ -43,11 +45,13 @@ def public_evaluation(response):
 
 
 def public_question(question):
-    """Return a question row without its private rubric."""
+    """Return a question row without its private rubric (or hidden tests)."""
     return {
         "index": question["question_index"], "question": question["question_text"],
         "difficulty": question["difficulty"], "is_follow_up": question["is_follow_up"],
         "topic": question["topic"],
+        "kind": question.get("kind") or "spoken",
+        **({"coding": question["coding"]} if question.get("coding") else {}),
         **({"boss_round": True} if question.get("boss_round") else {}),
     }
 
@@ -97,11 +101,14 @@ def store_question(cur, interview_id, turn, content):
     cur.execute(
         """INSERT INTO interview_questions
            (interview_id, question_index, question_text, difficulty, is_follow_up,
-            topic, adaptive_reason, rubric_points, boss_round)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *;""",
+            topic, adaptive_reason, rubric_points, boss_round, kind, coding, coding_private)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *;""",
         (interview_id, turn, content["question"], content["difficulty"],
          content["is_follow_up"], content["topic"], content["adaptive_reason"],
-         json.dumps(content["rubric_points"]), content.get("boss_round", False)),
+         json.dumps(content["rubric_points"]), content.get("boss_round", False),
+         content.get("kind", "spoken"),
+         json.dumps(content["coding"]) if content.get("coding") else None,
+         json.dumps(content["coding_private"]) if content.get("coding_private") else None),
     )
     question = cur.fetchone()
     # One batched embedding request for all rubric points (see get_embeddings).
@@ -160,7 +167,7 @@ def transcript_for_turn(cur, interview_id, question_index):
 
 
 def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision_metrics=None,
-                       recording=None):
+                       recording=None, answer_signals=None):
     """Embed, retrieve rubric matches, grade with Gemini and persist one answer.
 
     Pipeline: answer embedding → cosine search over this question's rubric
@@ -168,10 +175,13 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision
     When the answer was spoken, the transcript and its delivery metrics
     (computed at transcription time from the audio) are stored with it;
     ``answer`` is the text the candidate submitted, possibly edited.
+    ``answer_signals`` (browser: latency, gaze, lip movement, typing) and the
+    grader's content-style judgement are stored for the integrity assessment
+    made when the interview completes; neither is shown to the candidate.
     """
-    # Step A: Embed the answer (empty or failed embeddings skip retrieval).
+    # Step A: Embed the answer (empty, non-answer or failed embeddings skip retrieval).
     try:
-        vector = gemini_service.get_embedding(answer) if answer.strip() else []
+        vector = [] if nlp_evaluator.is_non_answer(answer) else gemini_service.get_embedding(answer)
     except Exception:
         vector = []
 
@@ -193,10 +203,19 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision
 
     # Step D: Speech-to-text output for this turn, if the answer was spoken.
     spoken = transcript_for_turn(cur, interview["id"], question["question_index"]) or {}
+    return insert_response(cur, interview, question, answer, evaluation, vector=vector, similarity=similarity,
+                           fillers=fillers, spoken=spoken, video_url=video_url, vision_metrics=vision_metrics,
+                           recording=recording, answer_signals=answer_signals)
+
+
+def insert_response(cur, interview, question, answer, evaluation, *, vector=None, similarity=0.0, fillers=None,
+                    spoken=None, video_url=None, vision_metrics=None, recording=None, answer_signals=None):
+    """Persist one graded answer with a copy of the question metadata."""
+    spoken = spoken or {}
+    fillers = fillers or nlp_evaluator.count_filler_words(answer)
     speech_metrics = spoken.get("speech_metrics")
     criteria = evaluation.get("criteria_scores")
-
-    # Step E: Persist the answer with a copy of the question metadata.
+    coding_result = evaluation.get("coding_result")
     cur.execute(
         """INSERT INTO interview_responses (
            interview_id, question_id, question_index, question_text, candidate_answer,
@@ -205,9 +224,10 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision
            feedback, strengths, improvements, missing_concepts, filler_metrics,
            evaluation_source, evaluated_at,
            criteria_scores, transcript, transcript_source, speech_metrics, vision_metrics, audio_path,
-           recording_part, answer_start_seconds, answer_end_seconds)
+           recording_part, answer_start_seconds, answer_end_seconds, answer_signals, content_signals,
+           coding_result)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),
-                   %s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            RETURNING *;""",
         (str(interview["id"]), str(question["id"]), question["question_index"],
          question["question_text"], answer, vector or None, similarity, video_url,
@@ -222,7 +242,10 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision
          json.dumps(speech_metrics) if speech_metrics else None,
          json.dumps(vision_metrics) if vision_metrics else None,
          spoken.get("audio_path"),
-         (recording or {}).get("part"), (recording or {}).get("start"), (recording or {}).get("end")),
+         (recording or {}).get("part"), (recording or {}).get("start"), (recording or {}).get("end"),
+         json.dumps(answer_signals) if answer_signals else None,
+         json.dumps(evaluation["content_signals"]) if evaluation.get("content_signals") else None,
+         json.dumps(coding_result) if coding_result else None),
     )
     return cur.fetchone()
 
@@ -288,9 +311,14 @@ def advance(cur, interview, response_id=None):
             (str(interview["id"]),),
         )
         history = cur.fetchall()
-        content = gemini_service.generate_adaptive_question(
+        if interview.get("coding_round") and turn + 1 in coding.coding_turns(interview["max_turns"]) and not boss_round:
+            content = coding.question_content(cur, interview, adaptation["next_difficulty"])
+        else:
+            content = None
+        content = content or gemini_service.generate_adaptive_question(
             role_title=interview["role_title"],
             job_description=(interview["job_description"] or "")[:4000],
+            **resume.prompt_context(interview.get("resume_text")),
             current_difficulty=adaptation["next_difficulty"],
             previous_question=response["question_text"],
             previous_topic=response["topic"],
@@ -321,6 +349,8 @@ def advance(cur, interview, response_id=None):
                 duration_seconds=GREATEST(0, EXTRACT(EPOCH FROM (NOW()-created_at))::integer),
                 overall_score=(SELECT ROUND(AVG(answer_quality_score)) FROM interview_responses WHERE interview_id=%s)
                 WHERE id=%s;""", (str(interview['id']), str(interview['id'])))
+            # Ranked finish: integrity penalties and the rating change.
+            result['ranking'] = arena.finalize(cur, interview)
 
     # Step F: Cache the result for idempotent retries.
     cur.execute("UPDATE interview_responses SET next_result = %s WHERE id = %s;",
@@ -347,8 +377,10 @@ def report_turns(cur, interview_id):
                   r.answer_quality_score, r.communication_score, r.feedback, r.evaluation_source,
                   r.next_result, r.criteria_scores, r.candidate_answer, r.transcript,
                   r.transcript_source, r.speech_metrics, r.vision_metrics, r.video_url, r.audio_path,
-                  r.recording_part, r.answer_start_seconds, r.answer_end_seconds
+                  r.recording_part, r.answer_start_seconds, r.answer_end_seconds, r.integrity,
+                  r.coding_result, q.kind, q.coding->>'title' AS coding_title
            FROM interview_responses r
+           LEFT JOIN interview_questions q ON q.id = r.question_id
            WHERE r.interview_id = %s
            ORDER BY r.question_index;""",
         (interview_id,),
@@ -378,5 +410,10 @@ def report_turns(cur, interview_id):
             "recording": ({"part": row["recording_part"], "start": row.get("answer_start_seconds"),
                            "end": row.get("answer_end_seconds")} if row.get("recording_part") else None),
             "adaptation": cached.get("adaptation") if isinstance(cached, dict) else None,
+            # Integrity flags and any score penalty (set when the interview completed).
+            "integrity": row.get("integrity"),
+            "kind": row.get("kind") or "spoken",
+            "coding_title": row.get("coding_title"),
+            "coding_result": row.get("coding_result"),
         })
     return turns

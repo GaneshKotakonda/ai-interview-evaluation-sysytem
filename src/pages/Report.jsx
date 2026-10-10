@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Mic, Minus, Play, Plus } from 'lucide-react';
+import {
+  AlertTriangle, ArrowLeft, Code2, Mic, Minus, Play, Plus,
+} from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
 import {
@@ -25,7 +27,9 @@ function scoreList(report) {
       { label: 'Speech Fluency', value: report.speech_fluency_score ?? report.voice_confidence_score },
       { label: 'Camera Engagement', value: report.camera_engagement_score },
     ];
-  return scores.filter((score) => score.value !== null && score.value !== undefined);
+  // With no substantive answers, Speech Fluency stays in the list as "—".
+  return scores.filter((score) => (score.value !== null && score.value !== undefined)
+    || (report.insufficient_responses && score.label === 'Speech Fluency'));
 }
 
 // Read the cached /complete response, but only for the interview requested.
@@ -113,6 +117,18 @@ const COMPONENT_LABELS = {
   camera_engagement: 'Camera engagement',
 };
 const present = (value) => value !== null && value !== undefined;
+
+// Questions answered / skipped / completion rate (scoring v3 reports).
+function CompletionBlock({ completion }) {
+  if (!completion) return null;
+  return (
+    <dl className="mt-6 grid grid-cols-3 gap-4 border-t border-line pt-5">
+      <Figure label="Questions answered" value={`${completion.answered} / ${completion.total}`} />
+      <Figure label="Questions skipped" value={completion.skipped} />
+      <Figure label="Completion rate" value={`${completion.rate_percent}%`} />
+    </dl>
+  );
+}
 
 // Small "label value" pair used in metric rows.
 function Figure({ label, value }) {
@@ -308,29 +324,122 @@ const INTEGRITY_LEVELS = {
   clean: { label: 'Clean', tone: 'ok', text: 'No integrity issues were recorded.' },
   minor: { label: 'Minor issues', tone: 'warn', text: 'A few events were recorded; review them below.' },
   flagged: { label: 'Flagged', tone: 'bad', text: 'Repeated or serious integrity events were recorded.' },
+  review: { label: 'Needs review', tone: 'warn', text: 'Signs of malpractice were found; affected answers were penalised.' },
+  invalid: { label: 'Invalid', tone: 'bad', text: 'The candidate\'s identity could not be confirmed throughout, so the interview scores 0.' },
+};
+const LEAVING = ['fullscreen_exit', 'tab_hidden', 'window_blur'];
+const MINOR_EVENTS = ['paste_blocked', 'copy_blocked', 'context_menu', 'devtools_shortcut', 'print_screen'];
+const FACE_VERDICTS = {
+  mismatch: 'Different person', multiple_faces: 'More than one face', no_face: 'No face', unclear: 'Unclear', uncertain: 'Inconclusive',
 };
 
-// Proctoring summary: reported beside the score, never folded into it.
-function IntegrityPanel({ integrity, events, playerRef, i }) {
+// Owner-only evidence image, fetched with the ID token.
+function IdentityImage({ interviewId, name, label }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let active = true;
+    let objectUrl;
+    api.getIdentityImageUrl?.(interviewId, name)
+      .then((value) => {
+        objectUrl = value;
+        if (active) setUrl(value);
+        else URL.revokeObjectURL(value);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [interviewId, name]);
+  return (
+    <figure className="w-28 shrink-0">
+      <div className="aspect-[4/3] overflow-hidden rounded-control border border-line bg-sunken">
+        {url && <img src={url} alt={label} className="h-full w-full object-cover" />}
+      </div>
+      <figcaption className="mt-1 text-[11px] leading-tight text-ink-3">{label}</figcaption>
+    </figure>
+  );
+}
+
+function IdentitySection({ integrity, identity, interviewId, playerRef }) {
+  const summary = integrity.identity;
+  if (!summary && !identity) return null;
+  const voice = summary?.voice_checks || {};
+  const voiceTotal = Object.values(voice).reduce((total, count) => total + count, 0);
+  const face = summary?.face_checks || {};
+  const faceTotal = Object.values(face).reduce((total, count) => total + count, 0);
+  const flagged = identity?.flagged_checks?.filter((check) => check.image_name) || [];
+  return (
+    <div className="mt-6 border-t border-line pt-5">
+      <h3 className="text-[13px] font-semibold text-ink">Identity</h3>
+      {!(summary?.enrolled || identity?.enrolled) ? (
+        <p className="mt-2 text-[13px] text-ink-3">Identity was not checked in this interview.</p>
+      ) : (
+        <>
+          <p className="mt-2 text-[13px] text-ink-2">
+            {voiceTotal > 0 && `Voice matched in ${voice.match || 0} of ${voiceTotal} spoken answers`}
+            {voiceTotal > 0 && faceTotal > 0 && ' · '}
+            {faceTotal > 0 && `face matched in ${face.match || 0} of ${faceTotal} camera checks`}
+            {summary?.face_mismatch_events ? ` · a different person was confirmed ${summary.face_mismatch_events}×` : ''}
+          </p>
+          <div className="mt-3 flex gap-3 overflow-x-auto pb-1">
+            {identity?.photo && <IdentityImage interviewId={interviewId} name={identity.photo} label="Enrolment photo" />}
+            {flagged.slice(0, 8).map((check) => (
+              <button
+                key={check.id}
+                type="button"
+                className="text-left"
+                disabled={!playerRef || !check.recording_part || check.at_seconds == null}
+                onClick={() => playerRef?.current?.play(check.recording_part, Math.max(0, check.at_seconds - 3))}
+              >
+                <IdentityImage
+                  interviewId={interviewId}
+                  name={check.image_name}
+                  label={`${FACE_VERDICTS[check.verdict] || check.verdict}${check.at_seconds != null ? ` · ${clock(check.at_seconds)}` : ''}`}
+                />
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Proctoring, identity and malpractice: the verdict and the evidence.
+function IntegrityPanel({ integrity, events, identity, interviewId, playerRef, i }) {
   if (!integrity) return null;
-  const level = INTEGRITY_LEVELS[integrity.level] || INTEGRITY_LEVELS.minor;
-  const blocked = Object.entries(integrity.counts || {})
-    .filter(([type]) => !['fullscreen_exit', 'tab_hidden', 'window_blur'].includes(type))
-    .reduce((total, [, count]) => total + count, 0);
+  const level = INTEGRITY_LEVELS[integrity.verdict] || INTEGRITY_LEVELS[integrity.level] || INTEGRITY_LEVELS.minor;
+  const counts = integrity.counts || {};
+  const blocked = MINOR_EVENTS.reduce((total, type) => total + (counts[type] || 0), 0);
+  const penalised = (integrity.answers_zeroed || 0) + (integrity.answers_capped || 0);
+  const left = LEAVING.reduce((total, type) => total + (counts[type] || 0), 0);
   return (
     <Panel i={i} className="p-6 sm:p-7">
       <SectionTitle
         title="Integrity"
-        description="Leaving the interview window, blocked actions and camera signals. Reported separately from the score."
+        description="Identity checks, other people or devices in view, other voices, reading detection and leaving the interview."
         action={<Badge tone={level.tone}>{level.label}</Badge>}
       />
       <p className="mt-2 text-[13px] text-ink-2">{level.text}</p>
+      {integrity.reasons?.length > 0 && (
+        <ul className="mt-3 space-y-1 text-[13px] text-ink-2">
+          {integrity.reasons.map((reason) => (
+            <li key={reason} className="flex gap-2"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink-3" />{reason}</li>
+          ))}
+        </ul>
+      )}
+      {integrity.score_before_integrity != null && (integrity.verdict === 'invalid' || penalised > 0) && (
+        <p className="mt-3 text-xs text-ink-3">Score before integrity adjustments: <span className="num font-mono text-ink">{integrity.score_before_integrity}</span></p>
+      )}
       <dl className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Figure label="Left the interview" value={`${integrity.violations ?? 0}×`} />
-        <Figure label="Time away" value={`${Math.round(integrity.time_away_seconds || 0)} s`} />
+        <Figure label="Integrity warnings" value={`${integrity.violations ?? 0}×`} />
+        <Figure label="Left the interview" value={`${left}× · ${Math.round(integrity.time_away_seconds || 0)} s`} />
+        <Figure label="Answers penalised" value={penalised} />
         <Figure label="Blocked actions" value={blocked} />
-        <Figure label="Extra faces on camera" value={integrity.multiple_face_events ?? 0} />
+        <Figure label="Gaze warnings" value={`${integrity.gaze_warnings ?? 0}×`} />
       </dl>
+      <IdentitySection integrity={integrity} identity={identity} interviewId={interviewId} playerRef={playerRef} />
       {events?.length > 0 && (
         <ol className="mt-5 divide-y divide-line border-t border-line">
           {events.map((event, index) => (
@@ -339,7 +448,7 @@ function IntegrityPanel({ integrity, events, playerRef, i }) {
                 <span className={`h-1.5 w-1.5 rounded-full ${event.major ? 'bg-bad' : 'bg-warn'}`} />
                 <span className="text-ink">{event.label}</span>
                 {event.question_index && <span className="text-ink-3">· question {event.question_index}</span>}
-                {event.duration_seconds != null && event.major && <span className="text-ink-3">· {Math.round(event.duration_seconds)} s away</span>}
+                {event.duration_seconds != null && event.major && <span className="text-ink-3">· {Math.round(event.duration_seconds)} s</span>}
               </span>
               {playerRef && event.recording_part && event.at_seconds != null ? (
                 <button type="button" className="num font-mono text-xs text-ink-2 underline decoration-line-strong underline-offset-4 hover:text-ink"
@@ -355,13 +464,57 @@ function IntegrityPanel({ integrity, events, playerRef, i }) {
   );
 }
 
+const LANGUAGE_LABELS = { python: 'Python', javascript: 'JavaScript', cpp: 'C++', java: 'Java' };
+
+const PENALTY_TEXT = {
+  zero: 'Scored 0: another person appears to have given this answer.',
+  cap: 'Capped at 40: this answer showed signs of assistance.',
+};
+
+function TurnIntegrity({ integrity }) {
+  const flags = integrity?.flags || [];
+  if (!flags.length) return null;
+  return (
+    <div className="mt-3 rounded-control border border-line bg-paper p-3">
+      <div className="flex flex-wrap gap-1.5">
+        {flags.map((flag) => (
+          <Badge key={flag.code} tone={flag.severity === 'review' ? 'warn' : 'bad'}>{flag.label}</Badge>
+        ))}
+      </div>
+      {PENALTY_TEXT[integrity.action] && (
+        <p className="mt-2 text-xs text-bad">
+          {PENALTY_TEXT[integrity.action]}
+          {integrity.original_score != null && ` Graded ${integrity.original_score}/100 before the adjustment.`}
+        </p>
+      )}
+      {flags.filter((flag) => flag.detail).map((flag) => (
+        <p key={`${flag.code}-detail`} className="mt-1 text-xs leading-relaxed text-ink-3">{flag.detail}</p>
+      ))}
+    </div>
+  );
+}
+
 function TurnDetails({ turn, interviewId, playerRef }) {
   const criteria = turn.evaluation?.criteria_scores;
-  const criteriaRows = CRITERIA.filter(([key]) => present(criteria?.[key]));
+  const skipped = turn.evaluation?.evaluation_source === 'skipped';
+  const criteriaRows = skipped ? [] : CRITERIA.filter(([key]) => present(criteria?.[key]));
   const speech = turn.speech_metrics;
   const vision = turn.vision_metrics;
+  const codingResult = turn.coding_result;
   return (
     <>
+      {codingResult && (
+        <div className="mt-2 space-y-1 text-xs text-ink-3">
+          <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="inline-flex items-center gap-1"><Code2 className="h-3 w-3" /> {LANGUAGE_LABELS[codingResult.language] || codingResult.language}</span>
+            <span className="num font-mono text-ink">{codingResult.passed}/{codingResult.total} tests passed</span>
+            <span>{codingResult.examples_passed} examples · {codingResult.hidden_passed} hidden</span>
+            {codingResult.complexity && <span>{codingResult.complexity}</span>}
+            {codingResult.review_score != null && <span>Code review {codingResult.review_score}/100</span>}
+          </p>
+          {!codingResult.compiled && <p className="text-warn">The code did not compile.</p>}
+        </div>
+      )}
       {criteriaRows.length > 0 && (
         <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-3">
           {criteriaRows.map(([key, label]) => (
@@ -390,7 +543,11 @@ function TurnDetails({ turn, interviewId, playerRef }) {
             <span className="group-open:hidden">Show your answer</span>
             <span className="hidden group-open:inline">Hide your answer</span>
           </summary>
-          <p className="mt-2 whitespace-pre-line rounded-control border border-line bg-paper p-3 text-[13px] leading-relaxed text-ink-2">{turn.answer}</p>
+          {codingResult ? (
+            <pre className="mt-2 max-h-80 overflow-auto rounded-control border border-line bg-paper p-3 font-mono text-[12px] leading-relaxed text-ink-2">{turn.answer}</pre>
+          ) : (
+            <p className="mt-2 whitespace-pre-line rounded-control border border-line bg-paper p-3 text-[13px] leading-relaxed text-ink-2">{turn.answer}</p>
+          )}
         </details>
       )}
       {turn.transcript_source && present(criteria?.relevance) && criteria.relevance < 35 && (
@@ -428,12 +585,16 @@ function AdaptiveJourney({ turns, interviewId, playerRef }) {
               <span className="text-ink-3">Question {turn.index || index + 1}</span>
               {turn.difficulty && <Badge>{capitalize(turn.difficulty)}</Badge>}
               {turn.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
+              {turn.evaluation?.evaluation_source === 'skipped' && <Badge tone="warn">Skipped</Badge>}
               {turn.topic && <span className="text-ink-3">{turn.topic}</span>}
             </div>
-            <h3 className="mt-2 font-serif text-xl leading-snug text-ink">{turn.question}</h3>
+            <h3 className="mt-2 font-serif text-xl leading-snug text-ink">{turn.kind === 'coding' && turn.coding_title ? `Coding: ${turn.coding_title}` : turn.question}</h3>
             {turn.evaluation?.answer_quality_score != null && (
-              <p className="num mt-3 font-mono text-[13px] text-ink">Technical score: {turn.evaluation.answer_quality_score}/100</p>
+              <p className="num mt-3 font-mono text-[13px] text-ink">
+                Technical score: {turn.integrity?.adjusted_score ?? turn.evaluation.answer_quality_score}/100
+              </p>
             )}
+            <TurnIntegrity integrity={turn.integrity} />
             <TurnDetails turn={turn} interviewId={interviewId} playerRef={playerRef} />
             {turn.evaluation?.feedback && <p className="mt-3 text-sm leading-relaxed text-ink-2">{turn.evaluation.feedback}</p>}
             {turn.evaluation?.evaluation_source === 'fallback' && (
@@ -552,9 +713,20 @@ export default function Report() {
         )}
       />
 
+      {report.integrity?.verdict === 'invalid' && (
+        <Notice tone="bad">
+          This interview is invalid: the candidate&apos;s identity could not be confirmed throughout, so the overall score is 0. See Integrity below.
+        </Notice>
+      )}
       {(report.ended_early || report.integrity?.ended_early) && (
         <Notice tone="bad">
-          This interview ended early after the candidate repeatedly left the interview window. Unanswered questions were scored 0.
+          This interview ended early after repeated integrity warnings. Unanswered questions earn no credit.
+        </Notice>
+      )}
+
+      {report.insufficient_responses && (
+        <Notice tone="warn">
+          Insufficient substantive responses were provided to evaluate interview performance.
         </Notice>
       )}
 
@@ -567,6 +739,7 @@ export default function Report() {
           <div className="mt-6 space-y-5">
             {scores.map((score, index) => <ProgressBar key={score.label} {...score} i={index} />)}
           </div>
+          <CompletionBlock completion={report.completion} />
           <ScoreMethod scoring={report.scoring} />
           <p className="mt-5 text-xs leading-relaxed text-ink-3">
             Scores summarise this practice session; they are not hiring decisions. Camera engagement is an observable
@@ -582,7 +755,7 @@ export default function Report() {
 
       {(report.criteria_scores || report.speech_metrics || report.vision_metrics?.answers_with_camera) && (
         <section className="grid gap-5 lg:grid-cols-2">
-          <CriteriaPanel criteria={report.criteria_scores} i={3} />
+          {!report.insufficient_responses && <CriteriaPanel criteria={report.criteria_scores} i={3} />}
           <DeliveryPanel speech={report.speech_metrics} vision={report.vision_metrics} i={3} />
         </section>
       )}
@@ -590,6 +763,8 @@ export default function Report() {
       <IntegrityPanel
         integrity={report.integrity}
         events={report.proctoring_events}
+        identity={report.identity}
+        interviewId={report.interview_id || interviewId}
         playerRef={recordingParts.length > 0 ? playerRef : null}
         i={3}
       />
