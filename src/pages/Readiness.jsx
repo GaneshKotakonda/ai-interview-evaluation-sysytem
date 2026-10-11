@@ -14,7 +14,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import DeviceCheck from '../components/DeviceCheck';
 import { Badge, FlowSteps, Notice, PageHeader, Panel, SectionTitle } from '../components/ui';
-import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode } from '../utils/interviewJourney';
+import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode, readInterviewerAccent, readInterviewerVoice } from '../utils/interviewJourney';
 import { api } from '../services/api';
 import { speak } from '../services/speech';
 import { NOISY_FLOOR, createVoiceMonitor } from '../services/voiceActivity';
@@ -77,9 +77,12 @@ export default function Readiness() {
   const [answerMode, setAnswerMode] = useState(() => readAnswerMode());
   // Coding round (VPL): suggested from the role until the candidate decides.
   const [codingChoice, setCodingChoice] = useState(null);
+  const [interviewerVoice, setInterviewerVoice] = useState(() => readInterviewerVoice());
+  const [interviewerAccent, setInterviewerAccent] = useState(() => readInterviewerAccent());
   const [micLevel, setMicLevel] = useState(0);
   const [roomNoise, setRoomNoise] = useState('measuring'); // measuring | quiet | noisy
   const [speakerState, setSpeakerState] = useState('idle'); // idle | playing | done
+  const [sampleState, setSampleState] = useState('idle'); // idle | playing
   const monitorRef = useRef(null);
 
   // -------------------------------------------------------------
@@ -192,6 +195,30 @@ export default function Readiness() {
     }, 150);
     return () => clearInterval(timer);
   }, []);
+
+  // Saved at once so "Test speakers" and the interview itself use this voice.
+  // A short sample is played with the saved voice, so the candidate hears
+  // each choice as they make it (and can replay it with the button).
+  const playSample = async () => {
+    setSampleState('playing');
+    await speak({ phrase: 'voice_sample' },
+      "Hi, I'll be your interviewer today. I'll ask you one question at a time, so take your time and answer clearly. Good luck.");
+    setSampleState('idle');
+  };
+
+  const chooseVoice = (value) => {
+    setInterviewerVoice(value);
+    localStorage.setItem(STORAGE_KEYS.interviewerVoice, value);
+    setSpeakerState('idle');
+    playSample();
+  };
+
+  const chooseAccent = (value) => {
+    setInterviewerAccent(value);
+    localStorage.setItem(STORAGE_KEYS.interviewerAccent, value);
+    setSpeakerState('idle');
+    playSample();
+  };
 
   const testSpeakers = async () => {
     setSpeakerState('playing');
@@ -425,6 +452,40 @@ export default function Readiness() {
                   </label>
                 ))}
               </div>
+            </fieldset>
+            <fieldset className="mt-5">
+              <legend className="text-[15px] font-semibold text-ink">Interviewer voice and accent</legend>
+              <div className="mt-3 grid grid-cols-2 gap-2" role="radiogroup" aria-label="Voice">
+                {[['female', 'Female'], ['male', 'Male']].map(([value, label]) => (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer items-center gap-2 rounded-control border px-3 py-2.5 text-sm font-medium transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ink ${
+                      interviewerVoice === value ? 'border-ink bg-ink text-paper' : 'border-line hover:border-ink-4'
+                    }`}
+                  >
+                    <input type="radio" name="interviewer-voice" value={value} checked={interviewerVoice === value} onChange={() => chooseVoice(value)} className="sr-only" />
+                    <Volume2 className="h-4 w-4" aria-hidden="true" />{label}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2" role="radiogroup" aria-label="Accent">
+                {[['american', 'American'], ['british', 'British']].map(([value, label]) => (
+                  <label
+                    key={value}
+                    className={`flex cursor-pointer items-center gap-2 rounded-control border px-3 py-2.5 text-sm font-medium transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ink ${
+                      interviewerAccent === value ? 'border-ink bg-ink text-paper' : 'border-line hover:border-ink-4'
+                    }`}
+                  >
+                    <input type="radio" name="interviewer-accent" value={value} checked={interviewerAccent === value} onChange={() => chooseAccent(value)} className="sr-only" />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <button type="button" onClick={playSample} disabled={sampleState === 'playing'} className="secondary-btn mt-3 w-full !py-2 text-[13px]">
+                <Volume2 className="h-4 w-4" />
+                {sampleState === 'playing' ? 'Playing sample…' : `Hear the ${interviewerAccent === 'british' ? 'British' : 'American'} ${interviewerVoice} voice`}
+              </button>
+              <p className="mt-2 text-xs text-ink-3">A short sample plays each time you change the voice or accent. Your choice is used for the whole interview.</p>
             </fieldset>
             <label className="mt-5 flex cursor-pointer items-start gap-3">
               <input

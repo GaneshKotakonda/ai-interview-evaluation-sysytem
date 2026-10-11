@@ -23,10 +23,16 @@ RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${STT_MODE
 
 # Same for the Piper voice used to speak the questions.
 ARG PIPER_VOICE=en_US-lessac-medium
+ARG PIPER_VOICE_MALE=en_US-ryan-medium
+ARG PIPER_VOICE_BRITISH=en_GB-jenny_dioco-medium
+ARG PIPER_VOICE_BRITISH_MALE=en_GB-alan-medium
 ENV PIPER_VOICE=${PIPER_VOICE} \
+    PIPER_VOICE_MALE=${PIPER_VOICE_MALE} \
+    PIPER_VOICE_BRITISH=${PIPER_VOICE_BRITISH} \
+    PIPER_VOICE_BRITISH_MALE=${PIPER_VOICE_BRITISH_MALE} \
     PIPER_VOICE_DIR=/models/piper \
     TTS_CACHE_DIR=/app/backend/tts_cache
-RUN python -m piper.download_voices "${PIPER_VOICE}" --download-dir /models/piper
+RUN python -m piper.download_voices "${PIPER_VOICE}" "${PIPER_VOICE_MALE}" "${PIPER_VOICE_BRITISH}" "${PIPER_VOICE_BRITISH_MALE}" --download-dir /models/piper
 
 # Identity-verification models (speaker + face), checksum-verified.
 ENV IDENTITY_MODEL_DIR=/models/identity

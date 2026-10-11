@@ -88,7 +88,12 @@ STT_MAX_AUDIO_SECONDS = _env_int("STT_MAX_AUDIO_SECONDS", 600)
 # runs locally. TTS_PROVIDER: "piper" (default) or "off" (the browser then
 # falls back to its own speech synthesis).
 TTS_PROVIDER = _env_str("TTS_PROVIDER", "piper").lower()
-PIPER_VOICE = _env_str("PIPER_VOICE", "en_US-lessac-medium")
+# Interviewer voices: female/male in an American or British accent (see tts_service.voice_model).
+PIPER_VOICE = _env_str("PIPER_VOICE", "en_US-lessac-medium")            # female (default)
+PIPER_VOICE_MALE = _env_str("PIPER_VOICE_MALE", "en_US-ryan-medium")
+# British accent (same female/male choice).
+PIPER_VOICE_BRITISH = _env_str("PIPER_VOICE_BRITISH", "en_GB-jenny_dioco-medium")
+PIPER_VOICE_BRITISH_MALE = _env_str("PIPER_VOICE_BRITISH_MALE", "en_GB-alan-medium")
 PIPER_VOICE_DIR = _env_str("PIPER_VOICE_DIR", os.path.join(BACKEND_DIR, "voices"))
 # >1 speaks more slowly; interview questions read slightly slower than default.
 PIPER_LENGTH_SCALE = float(_env_str("PIPER_LENGTH_SCALE", "1.05"))

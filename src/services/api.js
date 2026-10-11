@@ -76,6 +76,14 @@ async function requestBlob(url, failureMessage) {
   return response.blob();
 }
 
+// Query string for the interviewer voice; the defaults (female, American) are left out.
+const voiceQuery = (voice, accent) => {
+  const params = [];
+  if (voice === 'male') params.push('voice=male');
+  if (accent === 'british') params.push('accent=british');
+  return params.length ? `?${params.join('&')}` : '';
+};
+
 export const api = {
   // 1. Create a session and receive the first adaptive question.
   startInterview(
@@ -176,15 +184,18 @@ export const api = {
   },
 
   // 2g. Spoken interviewer audio (Piper). `item`: intro | outro | question-<n>.
-  async getSpeechUrl(interviewId, item) {
-    const blob = await requestBlob(interviewPath(interviewId, `speech/${encodeURIComponent(item)}`),
+  // `voice`: 'female' (default) or 'male'; `accent`: 'american' (default) or 'british'.
+  async getSpeechUrl(interviewId, item, voice = 'female', accent = 'american') {
+    const blob = await requestBlob(
+      interviewPath(interviewId, `speech/${encodeURIComponent(item)}${voiceQuery(voice, accent)}`),
       'Speech unavailable');
     return URL.createObjectURL(blob);
   },
 
   // 2h. Fixed spoken phrase (speaker test, "thank you", …).
-  async getPhraseUrl(phrase) {
-    const blob = await requestBlob(`${API_BASE_URL}/api/speech/${encodeURIComponent(phrase)}`,
+  async getPhraseUrl(phrase, voice = 'female', accent = 'american') {
+    const blob = await requestBlob(
+      `${API_BASE_URL}/api/speech/${encodeURIComponent(phrase)}${voiceQuery(voice, accent)}`,
       'Speech unavailable');
     return URL.createObjectURL(blob);
   },

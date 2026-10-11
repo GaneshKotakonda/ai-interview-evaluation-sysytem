@@ -93,7 +93,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Server starting; checking PostgreSQL connection")
     database.test_db_connection()
     threading.Thread(target=stt_service.warm_up, daemon=True).start()
-    threading.Thread(target=tts_service.warm_up, daemon=True).start()
+    threading.Thread(target=tts_service.warm_up_all, daemon=True).start()
     threading.Thread(target=identity.warm_up, daemon=True).start()
     threading.Thread(target=coding.warm_up, daemon=True).start()
     yield
@@ -1657,12 +1657,14 @@ def arena_me(user: AuthUser = Depends(auth.current_user)):
 # -------------------------------------------------------------
 # GET /api/interviews/{id}/speech/{item}   item: intro | outro | question-<n>
 # GET /api/speech/{phrase}                 fixed phrases (speaker test, thanks…)
+# Both accept ?voice=female|male (default female) and ?accent=american|british
+# (default american): the interviewer's voice.
 # Text is always built on the server (questions come from the database), so
 # the endpoints cannot be used to synthesise arbitrary text. 503 means the
 # browser should fall back to its own speech synthesis.
-def _speech_response(text: str):
+def _speech_response(text: str, voice: str = tts_service.DEFAULT_VOICE, accent: str = tts_service.DEFAULT_ACCENT):
     try:
-        path = tts_service.synthesize(text)
+        path = tts_service.synthesize(text, voice, accent)
     except tts_service.SpeechUnavailable as err:
         raise HTTPException(503, str(err))
     return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "private, max-age=86400"})
@@ -1675,7 +1677,9 @@ def _first_name(user: AuthUser) -> Optional[str]:
 
 
 @app.get("/api/interviews/{interview_id}/speech/{item}")
-def interview_speech(interview_id: str, item: str, user: AuthUser = Depends(auth.current_user)):
+def interview_speech(interview_id: str, item: str, voice: Literal["female", "male"] = "female",
+                     accent: Literal["american", "british"] = "american",
+                     user: AuthUser = Depends(auth.current_user)):
     match = re.fullmatch(r"question-(\d{1,2})", item)
     with transaction("Could not prepare the spoken question. Please retry.") as (_conn, cur):
         interview = owned_interview(cur, interview_id, user, lock=False)
@@ -1696,15 +1700,17 @@ def interview_speech(interview_id: str, item: str, user: AuthUser = Depends(auth
                                              bool(question.get("is_follow_up")))
         else:
             raise HTTPException(404, "Unknown speech item.")
-    return _speech_response(text)
+    return _speech_response(text, voice, accent)
 
 
 @app.get("/api/speech/{phrase}")
-def speech_phrase(phrase: str, user: AuthUser = Depends(auth.current_user)):
+def speech_phrase(phrase: str, voice: Literal["female", "male"] = "female",
+                  accent: Literal["american", "british"] = "american",
+                  user: AuthUser = Depends(auth.current_user)):
     text = tts_service.PHRASES.get(phrase)
     if not text:
         raise HTTPException(404, "Unknown phrase.")
-    return _speech_response(text)
+    return _speech_response(text, voice, accent)
 
 
 # -------------------------------------------------------------
@@ -1908,6 +1914,9 @@ def health():
         "text_to_speech": {
             "provider": config.TTS_PROVIDER,
             "voice": config.PIPER_VOICE if config.TTS_PROVIDER == "piper" else None,
+            "voices": ({accent: {choice: tts_service.voice_model(choice, accent) for choice in tts_service.VOICE_CHOICES}
+                        for accent in tts_service.ACCENT_CHOICES}
+                       if config.TTS_PROVIDER == "piper" else None),
             "loaded": tts_service.is_loaded(),
         },
         # Which identity checks this server can run (voice, face).

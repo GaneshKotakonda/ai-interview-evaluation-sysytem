@@ -76,6 +76,63 @@ describe('speech', () => {
     expect(api.getSpeechUrl).toHaveBeenCalledTimes(1);
   });
 
+  it('requests the chosen voice and caches each voice separately', async () => {
+    vi.stubGlobal('Audio', class {
+      play() { setTimeout(() => this.onended?.(), 0); return Promise.resolve(); }
+      pause() {}
+    });
+    api.getSpeechUrl.mockImplementation(async (_id, _item, voice) => `blob:${voice}`);
+    const { speak } = await import('./speech');
+    localStorage.setItem('interviewer-voice', 'male');
+    await speak({ interviewId: 'iv', item: 'question-1' }, 'fallback');
+    localStorage.setItem('interviewer-voice', 'female');
+    await speak({ interviewId: 'iv', item: 'question-1' }, 'fallback');
+    expect(api.getSpeechUrl.mock.calls.map((call) => call[2])).toEqual(['male', 'female']);
+    localStorage.removeItem('interviewer-voice');
+  });
+
+  it('requests the chosen accent and prefers a browser voice of that accent in the fallback', async () => {
+    vi.stubGlobal('Audio', class {
+      play() { setTimeout(() => this.onended?.(), 0); return Promise.resolve(); }
+      pause() {}
+    });
+    api.getSpeechUrl.mockImplementation(async (_id, _item, voice, accent) => `blob:${accent}:${voice}`);
+    const { speak } = await import('./speech');
+    localStorage.setItem('interviewer-accent', 'british');
+    await speak({ interviewId: 'iv', item: 'question-9' }, 'fallback');
+    expect(api.getSpeechUrl).toHaveBeenLastCalledWith('iv', 'question-9', 'female', 'british');
+
+    const chosen = [];
+    vi.stubGlobal('SpeechSynthesisUtterance', class { constructor(text) { this.text = text; } });
+    vi.stubGlobal('speechSynthesis', {
+      getVoices: () => [{ name: 'Samantha', lang: 'en-US' }, { name: 'Hazel', lang: 'en-GB' }],
+      cancel: () => {},
+      speak: (utterance) => { chosen.push(utterance.voice.name); setTimeout(() => utterance.onend(), 0); },
+    });
+    api.getPhraseUrl.mockRejectedValue(new Error('503'));
+    await speak({ phrase: 'speaker_test' }, 'Hello');
+    localStorage.removeItem('interviewer-accent');
+    expect(chosen).toEqual(['Hazel']);
+  });
+
+  it('prefers a matching browser voice for the chosen gender in the fallback', async () => {
+    const chosen = [];
+    vi.stubGlobal('SpeechSynthesisUtterance', class { constructor(text) { this.text = text; } });
+    vi.stubGlobal('speechSynthesis', {
+      getVoices: () => [{ name: 'Microsoft Zira', lang: 'en-US' }, { name: 'Microsoft David', lang: 'en-US' }],
+      cancel: () => {},
+      speak: (utterance) => { chosen.push(utterance.voice.name); setTimeout(() => utterance.onend(), 0); },
+    });
+    api.getPhraseUrl.mockRejectedValue(new Error('503'));
+    const { speak } = await import('./speech');
+    localStorage.setItem('interviewer-voice', 'male');
+    await speak({ phrase: 'speaker_test' }, 'Hello');
+    localStorage.setItem('interviewer-voice', 'female');
+    await speak({ phrase: 'speaker_test' }, 'Hello');
+    localStorage.removeItem('interviewer-voice');
+    expect(chosen).toEqual(['Microsoft David', 'Microsoft Zira']);
+  });
+
   it('falls back to the browser voice when the server voice is unavailable', async () => {
     const spoken = [];
     vi.stubGlobal('SpeechSynthesisUtterance', class { constructor(text) { this.text = text; } });

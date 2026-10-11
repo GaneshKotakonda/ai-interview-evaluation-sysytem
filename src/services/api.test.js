@@ -225,8 +225,16 @@ describe('voice interview API', () => {
     expect(fetch.mock.calls[1][0]).toBe('http://localhost:8000/api/interviews/iv/speech/question-2');
     await api.getPhraseUrl('speaker_test');
     expect(fetch.mock.calls[2][0]).toBe('http://localhost:8000/api/speech/speaker_test');
+    await api.getSpeechUrl('iv', 'question-2', 'male');
+    expect(fetch.mock.calls[3][0]).toBe('http://localhost:8000/api/interviews/iv/speech/question-2?voice=male');
+    await api.getPhraseUrl('speaker_test', 'male');
+    expect(fetch.mock.calls[4][0]).toBe('http://localhost:8000/api/speech/speaker_test?voice=male');
+    await api.getSpeechUrl('iv', 'intro', 'female', 'british');
+    expect(fetch.mock.calls[5][0]).toBe('http://localhost:8000/api/interviews/iv/speech/intro?accent=british');
+    await api.getPhraseUrl('speaker_test', 'male', 'british');
+    expect(fetch.mock.calls[6][0]).toBe('http://localhost:8000/api/speech/speaker_test?voice=male&accent=british');
     await api.getRecordingUrl('iv', 2);
-    expect(fetch.mock.calls[3][0]).toBe('http://localhost:8000/api/interviews/iv/recording/2');
+    expect(fetch.mock.calls[7][0]).toBe('http://localhost:8000/api/interviews/iv/recording/2');
   });
 });
 

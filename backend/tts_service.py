@@ -30,53 +30,72 @@ class SpeechUnavailable(Exception):
 
 
 # -------------------------------------------------------------
-# BLOCK 1: Lazily loaded voice
+# BLOCK 1: Lazily loaded voices (female and male)
 # -------------------------------------------------------------
-_voice = None
+VOICE_CHOICES = ("female", "male")
+ACCENT_CHOICES = ("american", "british")
+DEFAULT_VOICE = "female"
+DEFAULT_ACCENT = "american"
+
+_voices: dict = {}  # voice model name -> loaded PiperVoice
 _voice_lock = threading.Lock()
 _synth_lock = threading.Lock()
 
 
-def _voice_path() -> str:
-    return os.path.join(config.PIPER_VOICE_DIR, f"{config.PIPER_VOICE}.onnx")
+def voice_model(choice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT) -> str:
+    """Piper model name for a voice ("female"/"male") and accent
+    ("american"/"british"); anything else falls back to the defaults."""
+    male = choice == "male"
+    if accent == "british":
+        return config.PIPER_VOICE_BRITISH_MALE if male else config.PIPER_VOICE_BRITISH
+    return config.PIPER_VOICE_MALE if male else config.PIPER_VOICE
 
 
-def _get_voice():
-    global _voice
+def _voice_path(choice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT) -> str:
+    return os.path.join(config.PIPER_VOICE_DIR, f"{voice_model(choice, accent)}.onnx")
+
+
+def _get_voice(choice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT):
+    name = voice_model(choice, accent)
     with _voice_lock:
-        if _voice is None:
+        if name not in _voices:
             from piper import PiperVoice
             from piper.download_voices import download_voice
             from pathlib import Path
 
-            path = _voice_path()
+            path = _voice_path(choice, accent)
             if not os.path.isfile(path):
-                logger.info("Downloading Piper voice %s", config.PIPER_VOICE)
+                logger.info("Downloading Piper voice %s", name)
                 os.makedirs(config.PIPER_VOICE_DIR, exist_ok=True)
-                download_voice(config.PIPER_VOICE, Path(config.PIPER_VOICE_DIR))
-            logger.info("Loading Piper voice %s", config.PIPER_VOICE)
-            _voice = PiperVoice.load(path)
-        return _voice
+                download_voice(name, Path(config.PIPER_VOICE_DIR))
+            logger.info("Loading Piper voice %s", name)
+            _voices[name] = PiperVoice.load(path)
+        return _voices[name]
 
 
-def warm_up() -> bool:
-    """Load the voice and run one tiny synthesis so the first request is fast."""
+def warm_up(choice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT) -> bool:
+    """Load a voice and run one tiny synthesis so the first request is fast."""
     if config.TTS_PROVIDER != "piper":
         return False
     try:
         # Load explicitly: synthesize() may be served from the disk cache
         # without ever touching the voice.
-        voice = _get_voice()
+        voice = _get_voice(choice, accent)
         with _synth_lock, wave.open(io.BytesIO(), "wb") as wav_file:
             voice.synthesize_wav("Ready.", wav_file)
         return True
     except Exception:
-        logger.exception("Piper text-to-speech could not be loaded")
+        logger.exception("Piper text-to-speech could not be loaded (%s %s voice)", accent, choice)
         return False
 
 
+def warm_up_all() -> bool:
+    """Warm every voice; True only when all of them loaded."""
+    return all([warm_up(choice, accent) for accent in ACCENT_CHOICES for choice in VOICE_CHOICES])
+
+
 def is_loaded() -> bool:
-    return _voice is not None
+    return bool(_voices)
 
 
 # -------------------------------------------------------------
@@ -92,28 +111,31 @@ def prepare_text(text: str) -> str:
 # -------------------------------------------------------------
 # BLOCK 3: Synthesis with an on-disk cache
 # -------------------------------------------------------------
-def _cache_path(text: str) -> str:
-    key = f"{config.PIPER_VOICE}|{config.PIPER_LENGTH_SCALE}|{text}".encode("utf-8")
+def _cache_path(text: str, choice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT) -> str:
+    key = f"{voice_model(choice, accent)}|{config.PIPER_LENGTH_SCALE}|{text}".encode("utf-8")
     return os.path.join(config.TTS_CACHE_DIR, hashlib.sha256(key).hexdigest() + ".wav")
 
 
-def synthesize(text: str) -> str:
-    """Return the path of a WAV file speaking ``text``; raises SpeechUnavailable."""
+def synthesize(text: str, voice: str = DEFAULT_VOICE, accent: str = DEFAULT_ACCENT) -> str:
+    """Return the path of a WAV file speaking ``text`` in the chosen voice
+    ("female" or "male") and accent ("american" or "british"); raises SpeechUnavailable."""
+    voice = voice if voice in VOICE_CHOICES else DEFAULT_VOICE
+    accent = accent if accent in ACCENT_CHOICES else DEFAULT_ACCENT
     if config.TTS_PROVIDER != "piper":
         raise SpeechUnavailable("Text-to-speech is turned off on this server.")
     text = prepare_text(text)
     if not text:
         raise SpeechUnavailable("Nothing to say.")
-    path = _cache_path(text)
+    path = _cache_path(text, voice, accent)
     if os.path.isfile(path):
         return path
     try:
         from piper import SynthesisConfig
 
-        voice = _get_voice()
+        engine = _get_voice(voice, accent)
         buffer = io.BytesIO()
         with _synth_lock, wave.open(buffer, "wb") as wav_file:
-            voice.synthesize_wav(text, wav_file,
+            engine.synthesize_wav(text, wav_file,
                                  syn_config=SynthesisConfig(length_scale=config.PIPER_LENGTH_SCALE))
     except Exception as err:
         logger.warning("Piper synthesis failed: %s", err)
@@ -134,6 +156,9 @@ def synthesize(text: str) -> str:
 # general-purpose speech service.
 PHRASES = {
     "speaker_test": "This is a speaker test. If you can hear this clearly, your audio is ready for the interview.",
+    # Played on the Readiness page so the candidate can hear each voice.
+    "voice_sample": ("Hi, I'll be your interviewer today. I'll ask you one question at a time, "
+                     "so take your time and answer clearly. Good luck."),
     "thanks": "Thank you.",
     "thanks_next": "Thank you. Let's move on to the next question.",
     "no_speech": "Sorry, I couldn't hear an answer. Please try answering again.",

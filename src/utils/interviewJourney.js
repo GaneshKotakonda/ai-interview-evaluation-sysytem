@@ -15,6 +15,8 @@ export const STORAGE_KEYS = {
   arenaInterviewId: 'arena-interview-id',     // sessionStorage: last Arena UUID
   answerMode: 'interview-answer-mode',        // 'voice' (default) or 'typed', chosen on Readiness
   endedEarly: 'interview-ended-early',        // why proctoring ended it: 'away' or 'violations'
+  interviewerVoice: 'interviewer-voice',      // 'female' (default) or 'male', chosen on Readiness
+  interviewerAccent: 'interviewer-accent',    // 'american' (default) or 'british', chosen on Readiness
   codingRound: 'interview-coding-round',      // 'on' | 'off', chosen on Readiness (unset: decided by role)
 };
 
@@ -23,6 +25,24 @@ export const STORAGE_KEYS = {
 export function readCodingRound() {
   const value = localStorage.getItem(STORAGE_KEYS.codingRound);
   return value === 'on' ? true : value === 'off' ? false : null;
+}
+
+// The interviewer's spoken voice: 'female' (default) or 'male'.
+export function readInterviewerVoice() {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.interviewerVoice) === 'male' ? 'male' : 'female';
+  } catch {
+    return 'female';
+  }
+}
+
+// The interviewer's accent: 'american' (default) or 'british'.
+export function readInterviewerAccent() {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.interviewerAccent) === 'british' ? 'british' : 'american';
+  } catch {
+    return 'american';
+  }
 }
 
 // How the candidate answers: spoken (default) or typed (accessibility /

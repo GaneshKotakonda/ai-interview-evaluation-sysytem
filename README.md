@@ -74,7 +74,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f schema.sql
 .venv/Scripts/python -m uvicorn main:app --app-dir backend --reload --port 8000
 ```
 
-Always run the backend with the project's virtual environment. A system Python without these packages fails with `No module named 'google'`. The first start downloads the Whisper model (`base.en`, about 145 MB) and the Piper voice (`en_US-lessac-medium`, about 63 MB) into `backend/voices/` (git-ignored).
+Always run the backend with the project's virtual environment. A system Python without these packages fails with `No module named 'google'`. The first start downloads the Whisper model (`base.en`, about 145 MB) and the two Piper interviewer voices (female `en_US-lessac-medium`, male `en_US-ryan-medium`, about 63 MB each) into `backend/voices/` (git-ignored). Candidates choose the voice on the Readiness page.
 
 Copy `.env.example` to `.env` for the frontend and `backend/.env.example` to `backend/.env` for the backend. Do not commit either real environment file.
 
@@ -120,6 +120,7 @@ STT_MODEL=base.en
 # Spoken questions: piper (default) | off (browser voice fallback)
 TTS_PROVIDER=piper
 PIPER_VOICE=en_US-lessac-medium
+PIPER_VOICE_MALE=en_US-ryan-medium
 ```
 
 ## Database

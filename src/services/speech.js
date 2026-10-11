@@ -1,4 +1,5 @@
 import { api } from './api';
+import { readInterviewerAccent, readInterviewerVoice } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // Spoken interviewer
@@ -10,7 +11,7 @@ import { api } from './api';
 //
 // speak() resolves when speaking has finished (or failed); it never rejects.
 
-const urlCache = new Map(); // "interview:item" / "phrase:key" -> object URL
+const urlCache = new Map(); // "voice:interview:item" / "voice:phrase:key" -> object URL
 let current = null; // { audio, resolve }
 
 function stopCurrent() {
@@ -26,12 +27,12 @@ export function stopSpeaking() {
   stopCurrent();
 }
 
-async function resolveUrl(source) {
-  const key = source.phrase ? `phrase:${source.phrase}` : `${source.interviewId}:${source.item}`;
+async function resolveUrl(source, voice, accent) {
+  const key = `${accent}:${voice}:${source.phrase ? `phrase:${source.phrase}` : `${source.interviewId}:${source.item}`}`;
   if (!urlCache.has(key)) {
     const url = source.phrase
-      ? await api.getPhraseUrl(source.phrase)
-      : await api.getSpeechUrl(source.interviewId, source.item);
+      ? await api.getPhraseUrl(source.phrase, voice, accent)
+      : await api.getSpeechUrl(source.interviewId, source.item, voice, accent);
     urlCache.set(key, url);
   }
   return urlCache.get(key);
@@ -48,14 +49,25 @@ function playUrl(url) {
 }
 
 // Browser fallback voice; prefers a natural English voice when available.
-function speakWithBrowser(text) {
+// Browsers do not report a voice's gender, so the common voice names are matched.
+const MALE_VOICE = /\b(male|david|mark|james|daniel|george|alex|fred|guy|ryan|google uk english male)\b/i;
+const FEMALE_VOICE = /\b(female|zira|samantha|susan|hazel|karen|moira|aria|jenny|google us english)\b/i;
+
+function speakWithBrowser(text, voice = 'female', accent = 'american') {
   const synth = typeof window !== 'undefined' ? window.speechSynthesis : null;
   if (!synth || !text || typeof SpeechSynthesisUtterance === 'undefined') return Promise.resolve();
   return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = synth.getVoices();
-    utterance.voice = voices.find((v) => /natural|neural|google us english/i.test(v.name) && v.lang.startsWith('en'))
-      || voices.find((v) => v.lang.startsWith('en')) || null;
+    const allEnglish = voices.filter((v) => v.lang.startsWith('en'));
+    // Prefer voices of the chosen accent (en-GB / en-US) when the browser has any.
+    const accented = allEnglish.filter((v) => v.lang.replace('_', '-').toLowerCase() === (accent === 'british' ? 'en-gb' : 'en-us'));
+    const english = accented.length ? accented : allEnglish;
+    const wanted = voice === 'male' ? MALE_VOICE : FEMALE_VOICE;
+    utterance.voice = english.find((v) => wanted.test(v.name) && /natural|neural/i.test(v.name))
+      || english.find((v) => wanted.test(v.name))
+      || english.find((v) => /natural|neural|google us english/i.test(v.name))
+      || english[0] || null;
     utterance.rate = 0.98;
     utterance.onend = () => resolve();
     utterance.onerror = () => resolve();
@@ -71,11 +83,13 @@ function speakWithBrowser(text) {
  */
 export async function speak(source, fallbackText = '') {
   stopCurrent();
+  const voice = readInterviewerVoice();
+  const accent = readInterviewerAccent();
   try {
-    const url = await resolveUrl(source);
+    const url = await resolveUrl(source, voice, accent);
     await playUrl(url);
   } catch {
-    await speakWithBrowser(fallbackText);
+    await speakWithBrowser(fallbackText, voice, accent);
   }
 }
 

@@ -64,10 +64,55 @@ class TtsServiceTests(unittest.TestCase):
                 tts_service.synthesize("Hello")
 
 
+class VoiceChoiceTests(unittest.TestCase):
+    def _fake_voice(self):
+        voice = MagicMock()
+        voice.synthesize_wav.side_effect = lambda text, wav, syn_config=None: (
+            wav.setnchannels(1), wav.setsampwidth(2), wav.setframerate(22050), wav.writeframes(b"\0\0" * 10))
+        return voice
+
+    def test_model_names_and_unknown_choices(self):
+        self.assertEqual(tts_service.voice_model("female"), tts_service.config.PIPER_VOICE)
+        self.assertEqual(tts_service.voice_model("male"), tts_service.config.PIPER_VOICE_MALE)
+        self.assertEqual(tts_service.voice_model("robot"), tts_service.config.PIPER_VOICE)
+        self.assertNotEqual(tts_service.config.PIPER_VOICE, tts_service.config.PIPER_VOICE_MALE)
+        names = {tts_service.voice_model(c, a) for c in ("female", "male") for a in ("american", "british")}
+        self.assertEqual(len(names), 4)
+        self.assertTrue(tts_service.voice_model("male", "british").startswith("en_GB-"))
+        self.assertEqual(tts_service.voice_model("female", "martian"), tts_service.config.PIPER_VOICE)
+
+    def test_each_voice_is_cached_separately_and_uses_its_own_engine(self):
+        voices = {"female": self._fake_voice(), "male": self._fake_voice()}
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(tts_service.config, "TTS_PROVIDER", "piper"), \
+                patch.object(tts_service.config, "TTS_CACHE_DIR", folder), \
+                patch.object(tts_service, "_get_voice", side_effect=lambda choice="female", accent="american": voices[choice]):
+            female = tts_service.synthesize("Hello there", "female")
+            male = tts_service.synthesize("Hello there", "male")
+            again = tts_service.synthesize("Hello there", "male")
+            unknown = tts_service.synthesize("Hello there", "robot")
+            british = tts_service.synthesize("Hello there", "female", "british")
+            odd_accent = tts_service.synthesize("Hello there", "female", "martian")
+        self.assertNotEqual(female, british)  # the accent is part of the cache key
+        self.assertEqual(odd_accent, female)
+        self.assertNotEqual(female, male)
+        self.assertEqual(male, again)
+        self.assertEqual(unknown, female)
+        self.assertEqual(voices["female"].synthesize_wav.call_count, 2)  # american + british
+        self.assertEqual(voices["male"].synthesize_wav.call_count, 1)
+
+    def test_warm_up_all_loads_both_voices(self):
+        with patch.object(tts_service.config, "TTS_PROVIDER", "piper"), \
+                patch.object(tts_service, "_get_voice", return_value=self._fake_voice()) as load:
+            self.assertTrue(tts_service.warm_up_all())
+        self.assertEqual([c.args for c in load.call_args_list],
+                         [("female", "american"), ("male", "american"), ("female", "british"), ("male", "british")])
+
+
 class SpeechEndpointTests(unittest.TestCase):
     def _speak(self, item, one=None):
         with patch.object(main.database, "get_db_connection", return_value=connection_for(one)), \
-                patch.object(main.tts_service, "synthesize", side_effect=lambda text: f"/tmp/{len(text)}.wav") as synth, \
+                patch.object(main.tts_service, "synthesize", side_effect=lambda text, voice="female", accent="american": f"/tmp/{len(text)}.wav") as synth, \
                 patch.object(main, "FileResponse", side_effect=lambda path, **kw: {"path": path, **kw}):
             response = main.interview_speech(INTERVIEW_ID, item, user=USER)
         return response, synth.call_args[0][0]
@@ -79,6 +124,21 @@ class SpeechEndpointTests(unittest.TestCase):
             "question_text": "Explain idempotency.", "is_follow_up": False}})
         self.assertEqual(text, "Question 2. Explain idempotency.")
         self.assertEqual(response["media_type"], "audio/wav")
+
+    def test_voice_choice_reaches_the_synthesiser(self):
+        with patch.object(main.database, "get_db_connection", return_value=connection_for(None)), \
+                patch.object(main.tts_service, "synthesize", return_value="/tmp/x.wav") as synth, \
+                patch.object(main, "FileResponse", side_effect=lambda path, **kw: {"path": path}):
+            main.interview_speech(INTERVIEW_ID, "intro", voice="male", user=USER)
+            self.assertEqual(synth.call_args[0][1], "male")
+            main.speech_phrase("speaker_test", voice="male", user=USER)
+            self.assertEqual(synth.call_args[0][1], "male")
+            main.speech_phrase("speaker_test", user=USER)
+            self.assertEqual(synth.call_args[0][1:], ("female", "american"))
+            main.speech_phrase("voice_sample", voice="female", accent="british", user=USER)
+            self.assertIn("interviewer", synth.call_args[0][0])
+            main.speech_phrase("speaker_test", voice="male", accent="british", user=USER)
+            self.assertEqual(synth.call_args[0][1:], ("male", "british"))
 
     def test_future_questions_and_unknown_items_are_refused(self):
         for item in ("question-3", "question-0", "anything", "question-x"):
