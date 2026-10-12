@@ -1,0 +1,16 @@
+.git
+node_modules
+dist
+backend
+docs
+.venv
+**/__pycache__
+**/.env
+**/.env.*
+*.png
+*.pdf
+*.log
+deploy/Dockerfile*
+deploy/Caddyfile
+deploy/docker-compose.yml
+deploy/local/.env
