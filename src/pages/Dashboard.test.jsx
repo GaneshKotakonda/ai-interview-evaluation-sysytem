@@ -31,9 +31,7 @@ function renderDashboard() {
 }
 
 function statValue(label) {
-  const statLabel = screen.getAllByText(label).find((element) => element.tagName === 'P');
-  const card = statLabel.closest('article');
-  return card.querySelectorAll('p')[1];
+  return document.querySelector(`[data-stat="${label}"] [data-stat-value]`);
 }
 
 afterEach(() => {

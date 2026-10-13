@@ -13,6 +13,9 @@ import adaptive_service
 import config
 import gemini_service
 import main
+from auth import AuthUser
+
+TEST_USER = AuthUser(uid="firebase-user-abc123")
 import nlp_evaluator
 import scoring
 from adaptive_questions import fallback_question
@@ -32,15 +35,18 @@ class ScoringRuleTests(unittest.TestCase):
 
     def test_overall_score_drops_missing_camera_weight(self):
         self.assertEqual(scoring.overall_score(80, 80, 80, 80), 80)
-        # 0.40*90 + 0.25*70 + 0.15*80 = 65.5 over a weight of 0.80 -> 81.875
-        self.assertEqual(scoring.overall_score(90, 70, None, 80), 82)
+        # 0.70*90 + 0.15*70 + 0.10*80 = 81.5 over a weight of 0.95 -> 85.8
+        self.assertEqual(scoring.overall_score(90, 70, None, 80), 86)
+        self.assertEqual(scoring.overall_score(100, 0, 0, 0), 70)
+        self.assertEqual(scoring.WEIGHTS, {"answer_quality": 0.70, "communication": 0.15,
+                                           "speech_fluency": 0.10, "camera_engagement": 0.05})
 
     def test_speech_fluency_is_normalised_per_answer(self):
         self.assertEqual(scoring.speech_fluency(0, 5), 95)
         self.assertEqual(scoring.speech_fluency(10, 5), 91)  # 2 fillers per answer
         self.assertEqual(scoring.speech_fluency(10, 1), 75)
         self.assertEqual(scoring.speech_fluency(500, 1), 50)
-        self.assertEqual(scoring.speech_fluency(0, 0), 95)
+        self.assertIsNone(scoring.speech_fluency(0, 0))
 
     def test_filler_aggregation_and_average(self):
         summary = scoring.aggregate_fillers(["Um, like, I think", None, "you know, um"])
@@ -59,7 +65,7 @@ class EndpointFixTests(unittest.TestCase):
                       "overall_summary": ""}
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)), \
              patch.object(main.gemini_service, "batch_evaluate_interview", return_value=evaluation):
-            result = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest())
+            result = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=TEST_USER)
         self.assertNotIn("Camera Engagement", [s["label"] for s in result["scores"]])
         self.assertIsNone(result["camera_engagement_score"])
         self.assertIn("not measured", result["feedback"])
@@ -71,7 +77,7 @@ class EndpointFixTests(unittest.TestCase):
         with patch.object(main.database, "get_db_connection", return_value=conn), \
              patch.object(main.adaptive_service, "advance", side_effect=RuntimeError("secret detail")):
             with self.assertRaises(HTTPException) as caught:
-                main.next_question(INTERVIEW_ID)
+                main.next_question(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 500)
         self.assertNotIn("secret", caught.exception.detail)
         self.assertTrue(conn.rolled_back)
@@ -111,7 +117,7 @@ class EndpointFixTests(unittest.TestCase):
 
         cursor = ReportCursor()
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)):
-            result = main.get_interview_report(INTERVIEW_ID)
+            result = main.get_interview_report(INTERVIEW_ID, user=TEST_USER)
         self.assertEqual(result["role_title"], "Backend Engineer")
         self.assertEqual(result["turns"][0]["question"], "What is REST?")
         self.assertEqual(result["turns"][0]["adaptation"], {"reason": "Raise"})
@@ -122,7 +128,7 @@ class EndpointFixTests(unittest.TestCase):
     def test_report_rejects_bad_uuid(self):
         with patch.object(main.database, "get_db_connection", return_value=FakeConnection(FakeCursor())):
             with self.assertRaises(HTTPException) as caught:
-                main.get_interview_report("not-a-uuid")
+                main.get_interview_report("not-a-uuid", user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 400)
 
 
@@ -150,8 +156,16 @@ class ServiceFixTests(unittest.TestCase):
     def test_batch_evaluation_without_api_key_uses_local_fallback(self):
         with patch.object(config, "GEMINI_API_KEY", ""):
             result = gemini_service.batch_evaluate_interview("Engineer", None, [
-                {"question_index": 1, "similarity_score": 0.9, "filler_count": 0}])
+                {"question_index": 1, "candidate_answer": "A real answer about indexes",
+                 "similarity_score": 0.9, "filler_count": 0}])
         self.assertEqual(result["question_evaluations"][0]["answer_quality_score"], 90)
+
+    def test_batch_fallback_gives_empty_answers_zero_not_forty(self):
+        with patch.object(config, "GEMINI_API_KEY", ""):
+            result = gemini_service.batch_evaluate_interview("Engineer", None, [
+                {"question_index": 1, "candidate_answer": "", "similarity_score": 0.0, "filler_count": 0},
+                {"question_index": 2, "candidate_answer": "Skip.", "similarity_score": 0.0, "filler_count": 0}])
+        self.assertEqual([e["answer_quality_score"] for e in result["question_evaluations"]], [0, 0])
 
     def test_rubric_search_casts_vector_to_float8_array(self):
         class RubricCursor(FakeCursor):

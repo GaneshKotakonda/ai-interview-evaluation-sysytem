@@ -1,0 +1,22 @@
+# VPL code runner ("jail"): executes candidates' code, nothing else.
+# Build from the repository root:  docker build -f deploy/Dockerfile.runner -t interview-runner .
+# Runs with no internet access, a read-only filesystem and CPU/memory/process
+# limits (see docker-compose.yml). It holds no data and no secrets except
+# RUNNER_TOKEN, which the API uses to call it.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+# Compilers and runtimes for the supported languages.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ nodejs default-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install "fastapi>=0.115" "uvicorn>=0.30" "pydantic>=2.7" "python-dotenv>=1.0"
+
+WORKDIR /app
+COPY backend/config.py backend/code_runner.py backend/runner_service.py ./
+
+RUN useradd --create-home --uid 10002 runner
+USER runner
+EXPOSE 8080
+CMD ["python", "-m", "uvicorn", "runner_service:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
