@@ -57,7 +57,7 @@ The score-increase signal requires a current raw answer-quality score of at leas
 
 Ordinary gaze, latency alone, score changes alone, and browser departures alone never trigger. Identity mismatch remains under the existing identity policy and contributes no verification risk.
 
-Challenges replace a scheduled turn and never exceed the Standard interview's `max_turns` (default 5, API range 1–20). Issuance is suppressed for a final turn, a previously challenged parent response, the challenge cap, and an ordinary continuation from a verification question. A consecutive verification question is allowed only for a new, unconsumed direct episode observed after the prior challenge was generated. Arena mode (`game`) keeps its existing progression. Existing identity penalties and violation/end-away termination rules retain priority.
+Challenges replace a scheduled turn and never exceed the Standard interview's `max_turns` (default 5, API range 1–20). When the replaced turn was a scheduled coding turn, the coding question moves to the next turn (`adaptive_service.coding_due`), so a challenge never removes the coding round while turns remain. Issuance is suppressed for a final turn, a previously challenged parent response, the challenge cap, and an ordinary continuation from a verification question. A consecutive verification question is allowed only for a new, unconsumed direct episode observed after the prior challenge was generated. Arena mode (`game`) keeps its existing progression. Existing identity penalties and violation/end-away termination rules retain priority.
 
 Every recorded decision and challenge metadata object includes `policy_version`. Policy `risk_level` is `low` below 30, `moderate` from 30–59 and `high` from 60; these labels are policy bands.
 
@@ -129,7 +129,7 @@ Generation, question/rubric insertion, interview advancement and cached response
 | `POST /api/interviews/{id}/complete` | Preserve existing integrity adjustments and include verification totals/details/timeline |
 | `GET /api/interviews/{id}/report` | Rebuild the same verification aggregates from stored issued questions/results |
 
-Live question, state, evaluation and advancement projections omit internal risk, trigger evidence and `verification_meta`; the candidate sees `kind='verify'`, `is_verification=true`, the neutral question, normal TTS and the usual answer controls. The public advancement reason is “Knowledge verification challenge”. Existing Firebase ownership checks protect reports, identity images and recording playback.
+Live question, state, evaluation and advancement projections omit internal risk, trigger evidence and `verification_meta`; the API marks the question `kind='verify'` and `is_verification=true`, but the interview screen shows it with the same “AI Follow-up” label as any follow-up, with normal TTS and the usual answer controls; “Knowledge Verification” appears only in the report. The advancement reason “Knowledge verification challenge” is returned to the browser but shown only in the report. Existing Firebase ownership checks protect reports, identity images and recording playback.
 
 Completion and saved-report responses expose:
 
@@ -152,7 +152,7 @@ Verification grades and integrity-adjusted scores measure different things. For 
 
 The report presents “Integrity evidence → Verification requested → Concept tested → Verification result”, challenge/pass/partial/fail counts and the existing identity, warning and penalty sections. Evidence links use stable event IDs; parent question links point into the interview journey. Older reports normalize absent verification metadata to zero counts and empty lists, with the old proctoring timeline retained.
 
-The combined timeline is ordered by server receipt/generation/evaluation timestamps. Playback positions are recording-part offsets, starting again at each reload; these are a different time base from session/server timestamps. The UI labels `Part 2 · 0:12` separately from `Session time · 0:48` or an absolute server time. Server receipt time can follow an observation because delivery was delayed. Authenticated playback jumps to the stored part/offset, not to a converted server timestamp.
+The combined timeline is ordered by server receipt/generation/evaluation timestamps, compared as instants (database times may carry the database time zone, generated times are UTC). Playback positions are recording-part offsets, starting again at each reload; these are a different time base from session/server timestamps. The UI labels `Part 2 · 0:12` separately from `Session time · 0:48` or an absolute server time. Server receipt time can follow an observation because delivery was delayed. Authenticated playback jumps to the stored part/offset, not to a converted server timestamp.
 
 ## Apply the schema while preserving data
 
@@ -220,7 +220,7 @@ For a physical camera demonstration:
 
 1. Open a Standard interview in Chrome or Edge with camera/microphone permission, a visible face and good lighting. Use a concept in the current question/answer; Q2 is not guaranteed to be binary search in an ordinary session.
 2. While actively answering Q2, hold a real phone clearly in the camera frame for several seconds. Avoid extra browser departures or other violations that could terminate the interview first.
-3. If a confirmed phone episode is recorded, close the answer. With an available turn and challenge budget, the next question is labelled “Knowledge Verification” and spoken normally. Answer its reasoning or application probe.
+3. If a confirmed phone episode is recorded, close the answer. With an available turn and challenge budget, the next question is a verification question; the candidate sees the ordinary “AI Follow-up” label and hears it spoken normally (the report labels it “Knowledge Verification”). Answer its reasoning or application probe.
 4. Finish and inspect the report: evidence linked to Q2, issued Q3, the actual target, raw verification status/score, existing penalties and recording playback. A physical run is not expected to reproduce the controlled 82 score.
 
 The browser's [MediaPipe EfficientDet Lite0 scene monitor](../src/services/sceneMonitor.js) recognizes `cell phone` detections at confidence 0.4 or higher. `startSceneMonitor()` samples roughly every 1,000 ms; a phone condition must remain observed for at least 1,500 ms, which normally requires about three successive sampled detections, and clears after 3,000 ms without the condition. Model loading, frame availability and inference time can lengthen this. These checks operate on the camera frame in the browser and make no claim about a phone outside the frame.

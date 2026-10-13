@@ -244,7 +244,7 @@ def test_feature_disabled_preserves_ordinary_progression_and_stored_evidence(cli
         assert cur.fetchone()["n"] == 0
 
 
-def test_verification_replaces_planned_coding_turn_and_preserves_difficulty(client):
+def test_verification_takes_coding_turn_and_coding_moves_to_next_turn(client, monkeypatch):
     browser, connection, _ = client
     iid = start(browser, coding_round=True)
     browser.post(f"/api/interviews/{iid}/proctoring", json={"events": [{
@@ -257,8 +257,18 @@ def test_verification_replaces_planned_coding_turn_and_preserves_difficulty(clie
     assert issued["next_question"]["index"] == 2
     assert issued["next_question"]["kind"] == "verify"
     assert issued["next_question"]["difficulty"] == issued["adaptation"]["next_difficulty"] == expected
-    assert advance(browser, iid, answer(browser, iid, 2))["next_question"]["kind"] == "spoken"
-    scheduled = advance(browser, iid, answer(browser, iid, 3))["next_question"]
+    # The coding question displaced from turn 2 moves to turn 3; turn 4 keeps
+    # its own, so the interview still has both coding questions.
+    moved = advance(browser, iid, answer(browser, iid, 2))["next_question"]
+    assert moved["index"] == 3 and moved["kind"] == "coding"
+    monkeypatch.setattr(main.code_runner, "run_tests", lambda *a: {
+        "compiled": True, "compile_output": "", "passed": 1, "total": 1,
+        "results": [{"status": "passed", "time_ms": 1}]})
+    monkeypatch.setattr(gemini_service, "review_code", lambda *a: None)
+    submitted = browser.post(f"/api/interviews/{iid}/code/submit", json={
+        "question_index": 3, "language": "python", "code": "print('solution')"})
+    assert submitted.status_code == 200, submitted.text
+    scheduled = advance(browser, iid, submitted.json()["response_id"])["next_question"]
     assert scheduled["index"] == 4 and scheduled["kind"] == "coding"
 
 

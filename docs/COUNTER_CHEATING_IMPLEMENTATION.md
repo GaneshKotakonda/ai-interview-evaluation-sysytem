@@ -56,7 +56,7 @@ Start the existing `db` service first if it is stopped. No volume deletion is ne
 3. A serialized event queue drains batches of up to 50. Before `/next-question`, the required barrier waits for successful delivery, including an already running batch. Failures retain the queue and accepted response ID for retry.
 4. The existing locked `advance()` transaction first returns any cached `next_result`. Otherwise, shared assessment and strict attribution feed the deterministic Challenge Engine.
 5. An eligible decision generates one targeted verification question with a dedicated validated prompt or deterministic fallback. Question, private metadata, turn advancement and cached public result commit together. A rollback consumes no evidence.
-6. The candidate sees “Knowledge Verification” and “Let's verify one part of your previous answer.” Normal TTS, recording and spoken/typed answer handling remain active. The question uses the difficulty selected by existing adaptation.
+6. The candidate sees the ordinary “AI Follow-up” label, with no verification wording; “Knowledge Verification” appears only in the report. Normal TTS, recording and spoken/typed answer handling remain active. The question uses the difficulty selected by existing adaptation.
 7. The accepted verification answer is graded normally. Its raw score becomes a stored result: passed at 70+, partial at 50–69, failed below 50.
 8. Completion stores verification aggregates, challenge details and the combined evidence timeline. Completion/replay and saved reports expose the same aggregates, with older reports normalized to zero counts.
 

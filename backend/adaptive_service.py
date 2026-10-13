@@ -263,6 +263,27 @@ def insert_response(cur, interview, question, answer, evaluation, *, vector=None
     return cur.fetchone()
 
 
+def coding_due(cur, interview, next_turn):
+    """Is a coding question due on ``next_turn``?
+
+    Coding turns are fixed (coding.coding_turns). In a Standard interview a
+    knowledge-verification question can take a scheduled coding turn; the
+    coding question then moves to the next turn instead of being dropped,
+    so a challenge never removes the coding round while turns remain.
+    """
+    if not interview.get("coding_round"):
+        return False
+    scheduled = coding.coding_turns(interview["max_turns"])
+    if interview.get("interview_mode") != "standard":
+        return next_turn in scheduled
+    cur.execute("SELECT COUNT(*) AS issued FROM interview_questions WHERE interview_id = %s AND kind = 'coding';",
+                (str(interview["id"]),))
+    row = cur.fetchone()
+    if not row or row.get("issued") is None:
+        return next_turn in scheduled
+    return int(row["issued"]) < sum(1 for t in scheduled if t <= next_turn)
+
+
 # -------------------------------------------------------------
 # BLOCK 5: Advancing to the next turn
 # -------------------------------------------------------------
@@ -367,7 +388,7 @@ def advance(cur, interview, response_id=None):
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "recording_part": response.get("recording_part"), "at_seconds": response.get("answer_end_seconds")}
             adaptation.update(is_follow_up=True, reason="Knowledge verification challenge")
-        elif interview.get("coding_round") and turn + 1 in coding.coding_turns(interview["max_turns"]) and not boss_round:
+        elif coding_due(cur, interview, turn + 1) and not boss_round:
             content = coding.question_content(cur, interview, adaptation["next_difficulty"])
         else:
             content = None

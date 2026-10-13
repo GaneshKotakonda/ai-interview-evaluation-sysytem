@@ -1,5 +1,5 @@
 """Reviewer-only evidence chains from stored questions, results and observations."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 import integrity
 
@@ -15,6 +15,22 @@ def _time(value):
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _sort_key(entry):
+    """Order by the real instant: PostgreSQL returns timestamps in the
+    database time zone (e.g. +05:30) while generated/evaluated times are UTC,
+    so comparing their ISO text would misorder them."""
+    value = entry.get("created_at")
+    try:
+        moment = datetime.fromisoformat(value) if isinstance(value, str) else value
+    except ValueError:
+        moment = None
+    if not isinstance(moment, datetime):
+        return (0, datetime.min.replace(tzinfo=timezone.utc), entry["id"])  # undated entries first, as before
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (1, moment, entry["id"])
 
 
 def _elapsed(value, started):
@@ -94,5 +110,5 @@ def build(cur, interview):
     # Never pretend recording offsets from different reload parts share a
     # time origin. Receipt/generation timestamps give a stable server order;
     # recording offsets retain the observation's exact playback position.
-    timeline.sort(key=lambda e: (e.get("created_at") or "", e["id"]))
+    timeline.sort(key=_sort_key)
     return summary

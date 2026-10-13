@@ -753,15 +753,15 @@ export default function Interview() {
                   <span className="text-ink-4">·</span>
                   <Badge>{question?.difficulty?.replace(/^./, (c) => c.toUpperCase())}</Badge>
                   {coding && <Badge tone="ink"><Code2 className="h-3 w-3" /> Coding</Badge>}
-                  {verification && <Badge tone="ink">Knowledge Verification</Badge>}
-                  {question?.is_follow_up && !verification && <Badge tone="ink">AI Follow-up</Badge>}
+                  {/* A verification question looks like any follow-up to the candidate;
+                      "Knowledge Verification" is shown only in the report. */}
+                  {(question?.is_follow_up || verification) && <Badge tone="ink">AI Follow-up</Badge>}
                   {question?.topic && <span className="text-ink-3">{question.topic}</span>}
                 </div>
                 <h2 className="mt-4 font-serif text-[1.5rem] leading-snug text-ink sm:text-[1.75rem]">
                   {coding ? question.coding?.title : question?.question}
                 </h2>
                 {coding && <p className="mt-2 text-sm text-ink-2">{question.coding?.statement}</p>}
-                {verification && <p className="mt-2 text-sm text-ink-2">Apply a concept from your previous answer to this question.</p>}
               </div>
             )}
 

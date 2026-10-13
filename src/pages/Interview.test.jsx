@@ -181,9 +181,10 @@ it('shows neutral knowledge verification and uses the normal question TTS and sp
   api.nextQuestion.mockResolvedValueOnce({ next_question: verify, current_turn: 2, max_turns: 2, is_complete: false });
   await startAndListen();
   fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
-  expect(await screen.findByText('Knowledge Verification')).toBeInTheDocument();
-  expect(screen.getByText(/apply a concept from your previous answer/i)).toBeInTheDocument();
-  expect(screen.queryByText('AI Follow-up')).not.toBeInTheDocument();
+  // Neutral to the candidate: the same label as any follow-up, no verification wording.
+  expect(await screen.findByText('AI Follow-up')).toBeInTheDocument();
+  expect(screen.queryByText(/knowledge verification/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/apply a concept from your previous answer/i)).not.toBeInTheDocument();
   expect(screen.queryByText(/PRIVATE_TRIGGER|risk_score/)).not.toBeInTheDocument();
   expect(speech.speak).toHaveBeenCalledWith({ interviewId: 'session-1', item: 'question-2' }, expect.stringContaining(verify.question));
   expect(screen.getByText('Listening')).toBeInTheDocument();
