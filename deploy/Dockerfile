@@ -20,7 +20,9 @@ RUN pip install -r requirements.txt
 # does not wait for it and the container needs no internet for STT.
 ARG STT_MODEL=base.en
 ENV STT_MODEL=${STT_MODEL}
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${STT_MODEL}', device='cpu', compute_type='int8')"
+# Model downloads retry: GitHub and Hugging Face sometimes reset a connection.
+RUN n=0; until python -c "from faster_whisper import WhisperModel; WhisperModel('${STT_MODEL}', device='cpu', compute_type='int8')"; \
+    do n=$((n+1)); [ "$n" -ge 5 ] && exit 1; echo "retrying Whisper download ($n)"; sleep $((n*3)); done
 
 # Same for the Piper voice used to speak the questions.
 ARG PIPER_VOICE=en_US-lessac-medium
@@ -33,7 +35,8 @@ ENV PIPER_VOICE=${PIPER_VOICE} \
     PIPER_VOICE_BRITISH_MALE=${PIPER_VOICE_BRITISH_MALE} \
     PIPER_VOICE_DIR=/models/piper \
     TTS_CACHE_DIR=/app/backend/tts_cache
-RUN python -m piper.download_voices "${PIPER_VOICE}" "${PIPER_VOICE_MALE}" "${PIPER_VOICE_BRITISH}" "${PIPER_VOICE_BRITISH_MALE}" --download-dir /models/piper
+RUN n=0; until python -m piper.download_voices "${PIPER_VOICE}" "${PIPER_VOICE_MALE}" "${PIPER_VOICE_BRITISH}" "${PIPER_VOICE_BRITISH_MALE}" --download-dir /models/piper; \
+    do n=$((n+1)); [ "$n" -ge 5 ] && exit 1; echo "retrying Piper voice download ($n)"; sleep $((n*3)); done
 
 # Identity-verification models (speaker + face), checksum-verified.
 ENV IDENTITY_MODEL_DIR=/models/identity

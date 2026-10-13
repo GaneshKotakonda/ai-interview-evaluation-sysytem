@@ -11,6 +11,7 @@ download is rejected. Already-downloaded files are verified and skipped.
 import hashlib
 import os
 import sys
+import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +44,38 @@ def sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+# GitHub's file servers sometimes reset a connection mid-download, so one
+# failed attempt must not fail a whole Docker build.
+ATTEMPTS = 5
+TIMEOUT_SECONDS = 120
+
+
+def download(url: str, target: str) -> None:
+    with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response, open(target, "wb") as handle:
+        for block in iter(lambda: response.read(1024 * 1024), b""):
+            handle.write(block)
+
+
+def fetch(name: str, url: str, expected: str, path: str) -> bool:
+    """Download with retries; True once the file has the expected checksum."""
+    temporary = f"{path}.part"
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            download(url, temporary)
+            if sha256(temporary) == expected:
+                os.replace(temporary, path)
+                return True
+            problem = "checksum mismatch"
+        except OSError as err:  # connection reset, timeout, HTTP error
+            problem = str(err) or type(err).__name__
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        print(f"  attempt {attempt}/{ATTEMPTS} for {name} failed: {problem}", file=sys.stderr)
+        if attempt < ATTEMPTS:
+            time.sleep(2 * attempt)
+    return False
+
+
 def main() -> int:
     os.makedirs(config.IDENTITY_MODEL_DIR, exist_ok=True)
     for name, (url, expected) in MODELS.items():
@@ -51,13 +84,9 @@ def main() -> int:
             print(f"ok       {name}")
             continue
         print(f"download {name}")
-        temporary = f"{path}.part"
-        urllib.request.urlretrieve(url, temporary)
-        if sha256(temporary) != expected:
-            os.remove(temporary)
-            print(f"checksum mismatch for {name}", file=sys.stderr)
+        if not fetch(name, url, expected, path):
+            print(f"could not download {name} after {ATTEMPTS} attempts", file=sys.stderr)
             return 1
-        os.replace(temporary, path)
     return 0
 
 
