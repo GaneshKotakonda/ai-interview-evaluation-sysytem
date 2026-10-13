@@ -9,6 +9,7 @@ How and where to run the AI Interview Evaluation System in production. Status: *
 - Whole-interview recording with chunked upload, resume after reload, and playback in the report.
 - Proctoring: fullscreen enforcement, detection of leaving the interview (tab, window or app), blocked copy/paste/right-click and inspection shortcuts, second-display check, camera signals (extra faces, out of frame); automatic end after the configured number of violations; integrity section in the report.
 - Identity and malpractice detection: enrolment (photo + sentence read aloud), voice check on every answer, face checks every 20 s, other people/phones/books in view, speech without lip movement, covered/frozen/virtual cameras, injected typed text, reading-detection; per-answer penalties (0 or capped at 40) and a Clean / Needs review / Invalid verdict.
+- Knowledge Verification in Standard interviews: eligible stored evidence can replace a scheduled turn with a targeted challenge; ordinary grading supplies its raw result and the report shows evidence → request → concept → result. See [policy, configuration and validation limits](COUNTER_CHEATING.md).
 - Stricter grading: calibrated bands and caps for short, off-topic, incorrect or keyword-only answers.
 - Coding round with the built-in VPL: editor, examples, hidden tests, 70% tests + 30% AI code review; code runs in the isolated `runner` container.
 - Ranked Interview Arena: proctored, LeetCode-style rating with overall and category ranks, leaderboard, rating penalties for integrity warnings and leaving.
@@ -117,8 +118,8 @@ Firebase console → Authentication → Settings → **Authorised domains**: `ai
 2. Readiness: the mic meter moves, **Test speakers** plays the interviewer voice, consent and continue.
 3. Run a Standard interview by voice: each question is spoken, answers end with **Next Question** or a pause, and the interview finishes with the closing message.
 4. Proctoring: during an interview press Alt+Tab (or switch tab) and confirm the "You left the interview" warning, then return; in a second interview repeat until the limit ends it.
-5. Identity: the identity check appears after Start; let a second person sit in view, hold up a phone, and let someone else answer one question. Each shows a warning, and the report shows the verdict, the flagged snapshots and the penalised answer.
-6. Open the report: criteria, delivery, camera summary, **Integrity** section, and the interview recording with "Play this answer".
+5. Identity/integrity: the identity check appears after Start. Test a second person in view, a clearly visible phone and another speaker separately; inspect which warnings/evidence were actually recorded. Follow [the physical demonstration procedure and limitations](COUNTER_CHEATING.md#professor-demo-and-validation); successful real phone detection has not yet been verified.
+6. Open the report: criteria, delivery, camera summary, **Integrity & Knowledge Verification**, any issued challenge's raw result/evidence chain, and the interview recording with "Play this answer".
 7. Reload the page in the middle of an interview: it resumes without a second identity check.
 8. Coding round: on a coding role, question 2 opens the code editor; Run shows the examples, Submit grades hidden tests.
 9. Play a ranked Arena to the Boss Round; the result shows the rating change; the Leaderboard lists you.
@@ -127,10 +128,14 @@ Firebase console → Authentication → Settings → **Authorised domains**: `ai
 ## 4. Updating
 ```bash
 cd ai-interview-evaluation-sysytem && git pull
-cd deploy && docker compose up -d --build api
-# Apply schema changes (schema.sql is additive and safe to re-run):
+cd deploy
+docker compose up -d db
+# Apply schema changes to the existing database before restarting the API:
 docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < ../schema.sql
+docker compose up -d --build api
 ```
+The schema is rerunnable and preserves data. Existing Docker volumes do not rerun first-start initialization; apply the SQL explicitly and keep the database/recording volumes. For `deploy/local`, the equivalent command is `docker compose exec -T db psql -U interview -d interviews -v ON_ERROR_STOP=1 < ../../schema.sql`. [Knowledge Verification](COUNTER_CHEATING.md#database-and-api-flow) documents the added columns and configuration.
+
 Frontend: `npm run build && firebase deploy --only hosting`.
 
 ## 5. Backups and retention

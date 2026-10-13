@@ -357,3 +357,13 @@ CREATE INDEX IF NOT EXISTS question_rubrics_lookup_idx ON question_rubrics(inter
 CREATE INDEX IF NOT EXISTS interviews_user_created_idx ON interviews(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS interview_questions_interview_idx ON interview_questions(interview_id);
 CREATE INDEX IF NOT EXISTS interview_responses_interview_idx ON interview_responses(interview_id);
+
+-- 8g. Knowledge verification. Additive and safe for existing interviews.
+ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS verification_meta JSONB;
+ALTER TABLE interview_responses
+    ADD COLUMN IF NOT EXISTS verification_result JSONB,
+    ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS observation_start_seconds FLOAT CHECK (observation_start_seconds >= 0);
+CREATE UNIQUE INDEX IF NOT EXISTS verification_parent_response_unique_idx
+    ON interview_questions (interview_id, (verification_meta->>'parent_response_id'))
+    WHERE kind = 'verify' AND verification_meta->>'parent_response_id' IS NOT NULL;

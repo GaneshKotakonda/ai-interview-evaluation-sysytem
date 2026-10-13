@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import Report from './Report';
@@ -144,4 +144,122 @@ it('shows completion, the insufficient-responses notice and Speech Fluency "—"
   expect(screen.getByText('Camera Engagement')).toBeInTheDocument();
   expect(screen.queryByText('Answer criteria')).not.toBeInTheDocument();
   expect(screen.getByText('Skipped')).toBeInTheDocument();
+});
+
+it('shows the stored phone evidence, issued challenge, tested concept and raw verification result as a chain', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'verified', overall_score: 66,
+    verification: { challenges: 1, passed: 1, partial: 0, failed: 0 },
+    integrity: {
+      verdict: 'review', answers_capped: 1, counts: { phone_detected: 1 },
+      verification: {
+        challenges: 1, passed: 1, partial: 0, failed: 0,
+        details: [{
+          question_index: 3, question: 'Explain the worst-case comparisons for 1,024 sorted values.', parent_question_index: 2,
+          trigger_reason: 'Possible assistance detected: a phone was visible while answering.',
+          verification_target: 'Binary-search complexity', challenge_type: 'concept_probe', policy_version: 'counter_cheating_v1',
+          risk_score: 70, risk_level: 'high', generated_at: '2026-10-13T10:30:00Z',
+          evidence: [{ id: 'phone-1', event_type: 'phone_detected', label: 'Phone detected', question_index: 2, recording_part: 1, at_seconds: 35 }],
+          result: { status: 'passed', score: 82, target: 'Binary-search complexity', parent_question_index: 2 },
+        }],
+        timeline: [{ id: 'phone-1', type: 'phone_detected', label: 'Phone detected', question_index: 2, recording_part: 1, at_seconds: 35, major: true }],
+      },
+    },
+    turns: [{ index: 2, question: 'Explain binary search.', evaluation: { answer_quality_score: 85 } }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=verified']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  const section = await screen.findByRole('region', { name: 'Knowledge verification' });
+  expect(within(section).getByText('Challenges issued').parentElement).toHaveTextContent('1');
+  expect(within(section).getByText('Passed').parentElement).toHaveTextContent('1');
+  const chain = within(section).getByRole('list', { name: 'Verification chain for question 3' });
+  expect(within(chain).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+    expect.stringContaining('Integrity evidence'), expect.stringContaining('Verification requested'),
+    expect.stringContaining('Concept tested'), expect.stringContaining('Verification result'),
+  ]);
+  expect(within(chain).getByText('Phone detected during Q2')).toBeInTheDocument();
+  expect(within(chain).getByText('Knowledge Verification Q3')).toBeInTheDocument();
+  expect(within(chain).getByText('Binary-search complexity')).toBeInTheDocument();
+  expect(within(chain).getByText('PASSED 82%')).toBeInTheDocument();
+  expect(within(section).getByText(/Possible assistance detected: a phone was visible/)).toBeInTheDocument();
+  expect(within(section).getByRole('link', { name: 'Parent question 2' })).toHaveAttribute('href', '#interview-question-2');
+  expect(within(section).getByText(/does not establish or disprove cheating/)).toBeInTheDocument();
+  expect(screen.getByText('Answers penalised').parentElement).toHaveTextContent('1');
+});
+
+it('keeps issued unanswered challenges visible without fabricating a failed result', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'pending', overall_score: 60, ended_early: true,
+    verification: { challenges: 2, passed: 0, partial: 1, failed: 0 },
+    integrity: { verdict: 'review', verification: { details: [
+      { question_index: 3, parent_question_index: 2, question: 'Trace the loop.', trigger_reason: 'Evidence requires review.',
+        verification_target: 'Loop invariants', evidence: [], result: { status: 'partial', score: 61 } },
+      { question_index: 5, parent_question_index: 4, question: 'Explain the edge case.', trigger_reason: 'Verification requested after recorded evidence.',
+        verification_target: 'Empty input', evidence: [], result: null },
+    ], timeline: [] } },
+  });
+  render(<MemoryRouter initialEntries={['/report?id=pending']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  const section = await screen.findByRole('region', { name: 'Knowledge verification' });
+  expect(within(section).getByText('Challenges issued').parentElement).toHaveTextContent('2');
+  expect(within(section).getByText('Partial').parentElement).toHaveTextContent('1');
+  expect(within(section).getByText('Failed').parentElement).toHaveTextContent('0');
+  expect(within(section).getByText('PARTIAL 61%')).toBeInTheDocument();
+  const unanswered = within(section).getByRole('list', { name: 'Verification chain for question 5' });
+  expect(within(unanswered).getByText('Unanswered')).toBeInTheDocument();
+  expect(within(unanswered).queryByText(/FAILED|0%/)).not.toBeInTheDocument();
+  expect(within(section).getByText('Explain the edge case.')).toBeInTheDocument();
+});
+
+it('uses the combined evidence timeline and jumps to the labelled recording part', async () => {
+  URL.revokeObjectURL = vi.fn();
+  const readyState = vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(1);
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  const { api } = await import('../services/api');
+  api.getRecordingUrl = vi.fn().mockResolvedValue('blob:part-2');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'timeline', overall_score: 80, recording_parts: [1, 2],
+    integrity: { level: 'flagged', verification: { challenges: 1, passed: 1, partial: 0, failed: 0, details: [], timeline: [
+      { id: 'p2', type: 'phone_detected', label: 'Device observation', question_index: 2, recording_part: 2, at_seconds: 12, major: true },
+      { id: 'request-3', type: 'verification_requested', label: 'Verification requested', question_index: 3, at_seconds: 48, created_at: '2026-10-13T10:30:48Z' },
+      { id: 'result-3', type: 'verification_result', label: 'Verification completed', question_index: 3, created_at: '2026-10-13T10:31:22Z', status: 'passed', score: 82 },
+    ] } },
+    proctoring_events: [{ label: 'Legacy duplicate event', event_type: 'phone_detected', question_index: 2 }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=timeline']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  try {
+    const timeline = await screen.findByRole('list', { name: 'Integrity and verification timeline' });
+    expect(within(timeline).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      expect.stringContaining('Device observation'), expect.stringContaining('Verification requested'), expect.stringContaining('Verification completed'),
+    ]);
+    expect(within(timeline).getByText('Session time · 0:48')).toBeInTheDocument();
+    expect(within(timeline).getByText(/Server time.*10:31:22 UTC/)).toBeInTheDocument();
+    expect(within(timeline).getByText('PASSED 82%')).toBeInTheDocument();
+    expect(screen.queryByText('Legacy duplicate event')).not.toBeInTheDocument();
+    fireEvent.click(within(timeline).getByRole('button', { name: 'Play Device observation · Part 2 · 0:12' }));
+    await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', 'blob:part-2'));
+    await waitFor(() => expect(document.querySelector('video').currentTime).toBe(9));
+    expect(api.getRecordingUrl).toHaveBeenCalledWith('timeline', 2);
+  } finally {
+    readyState.mockRestore();
+    play.mockRestore();
+  }
+});
+
+it('normalizes legacy verification data to zero counts and retains the old event timeline', async () => {
+  const { api } = await import('../services/api');
+  api.getReport.mockResolvedValueOnce({
+    interview_id: 'legacy', overall_score: 80,
+    integrity: { level: 'minor', violations: 1, counts: { tab_hidden: 1 } },
+    proctoring_events: [{ event_type: 'tab_hidden', label: 'Left the interview tab', major: true, question_index: 1, recording_part: 1, at_seconds: 15 }],
+  });
+  render(<MemoryRouter initialEntries={['/report?id=legacy']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Report /></MemoryRouter>);
+  const section = await screen.findByRole('region', { name: 'Knowledge verification' });
+  for (const label of ['Challenges issued', 'Passed', 'Partial', 'Failed']) {
+    expect(within(section).getByText(label).parentElement).toHaveTextContent('0');
+  }
+  expect(within(section).getByText('No knowledge verification challenges were issued.')).toBeInTheDocument();
+  const timeline = screen.getByRole('list', { name: 'Integrity and verification timeline' });
+  expect(within(timeline).getByText('Left the interview tab')).toBeInTheDocument();
+  expect(within(timeline).getByText('Part 1 · 0:15')).toBeInTheDocument();
 });

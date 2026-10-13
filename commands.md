@@ -90,7 +90,8 @@ Use `localhost` exactly as written. The browser only allows the camera and micro
 | Proctoring | Switch tab or exit fullscreen: warning. 3 warnings (or 5 seconds away) end the interview |
 | Background sound | Play music while you are silent for 6+ seconds: a warning appears |
 | Coding round | Questions 2 and 4 open the code editor with test cases |
-| Report | Scores, completion rate, integrity section and recording playback |
+| Knowledge Verification | Confirmed eligible evidence can replace the next Standard turn with a targeted question; see [the demo and limits](docs/COUNTER_CHEATING.md#professor-demo-and-validation) |
+| Report | Scores, completion rate, Integrity & Knowledge Verification, evidence chain and recording playback |
 
 ## 7. Everyday commands
 
@@ -101,11 +102,24 @@ Run these from the `deploy/local` folder.
 | Stop the app (keeps your data) | `docker compose stop` |
 | Start it again | `docker compose start` |
 | See the logs | `docker compose logs -f api` |
-| Update to the latest code | `git pull` then `docker compose up -d --build` |
+| Update to the latest code | `git pull`, apply the schema below, then `docker compose up -d --build` |
 | Stop and remove the containers (keeps data) | `docker compose down` |
-| Remove everything including data | `docker compose down -v` |
 
-If the code changed the database layout after you first started, run `docker compose down -v` once and start again, so the database is created from the new `schema.sql`.
+After pulling a change, apply the additive schema to the existing database. From `deploy/local`:
+
+```bash
+docker compose up -d db
+docker compose exec -T db psql -U interview -d interviews -v ON_ERROR_STOP=1 < ../../schema.sql
+docker compose up -d --build
+```
+
+This can be repeated and keeps the current database, interviews and recordings. PostgreSQL's first-start initialization does not rerun on an existing volume. Do not remove volumes to apply a schema update. See [Knowledge Verification](docs/COUNTER_CHEATING.md) for policy settings and the new columns.
+
+Windows PowerShell: use this schema step instead of the command containing `<`:
+
+```powershell
+Get-Content ../../schema.sql -Raw | docker compose exec -T db psql -U interview -d interviews -v ON_ERROR_STOP=1
+```
 
 ## 8. Troubleshooting
 
@@ -119,9 +133,12 @@ If the code changed the database layout after you first started, run `docker com
 | Questions look generic / grading says "approximate" | `GEMINI_API_KEY` is missing or wrong in `.env`. Fix it and run `docker compose up -d`. |
 | Build fails while downloading | Check your internet connection and run `docker compose up -d --build` again. |
 | Windows: build is very slow or runs out of memory | In Docker Desktop settings, give Docker at least 4 GB of memory. |
+| `column … does not exist` | Apply the additive schema using the commands in section 7, then rebuild/restart. |
 
-## 9. Remove everything when you are done
+## 9. Remove the containers and images when you are done
+
+The database and recording volumes remain available for a later start:
 
 ```bash
-docker compose down -v --rmi all
+docker compose down --rmi all
 ```

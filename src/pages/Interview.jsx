@@ -67,6 +67,8 @@ export default function Interview() {
   const pendingRef = useRef(null);          // answer awaiting submit
   const pendingAudioRef = useRef(null);     // recorded answer awaiting transcription
   const answerStartRef = useRef(0);
+  const answerObservationStartRef = useRef(null);
+  const answerRecordingPositionRef = useRef(undefined); // immutable cutoff, including retries
   const noSpeechRetriesRef = useRef(0);
   const busyRef = useRef(false);
   const unmountedRef = useRef(false);
@@ -102,6 +104,7 @@ export default function Interview() {
   const targetJd = useMemo(() => localStorage.getItem(STORAGE_KEYS.jobDescription) || '', []);
   const isLastTurn = currentTurn >= maxTurns;
   const coding = question?.kind === 'coding';
+  const verification = question?.kind === 'verify' || question?.is_verification === true;
 
   // Proctoring and malpractice detection. Ending early (too many warnings
   // or staying away) saves what was answered and goes to the report.
@@ -290,10 +293,11 @@ export default function Interview() {
     if (unmountedRef.current || guard.isTerminated()) return;
     const codingTurn = turnQuestion?.kind === 'coding';
     answerStartRef.current = sessionRef.current?.elapsedSeconds() ?? 0;
+    answerRecordingPositionRef.current = undefined;
     setListen({ level: 0, countdown: null, seconds: 0, noVoice: false });
     pendingAudioRef.current = null;
     answerSignalsRef.current = createAnswerSignals({ voiceMode: voiceMode && !codingTurn, now: performance.now() });
-    guard.newAnswer();
+    guard.beginAnswer(turnQuestion.index);
     monitorRef.current?.reset();
     if (voiceMode && !codingTurn) answerRecRef.current = startAnswerRecording(streamRef.current);
     setStage(codingTurn ? 'coding' : 'listening');
@@ -302,6 +306,8 @@ export default function Interview() {
   const askQuestion = useCallback(async (nextQuestion, id) => {
     if (unmountedRef.current || guard.isTerminated()) return;
     setQuestion(nextQuestion);
+    answerObservationStartRef.current = sessionRef.current?.elapsedSeconds() ?? null;
+    guard.beginAnswer(nextQuestion.index);
     setTypedAnswer('');
     noSpeechRetriesRef.current = 0;
     setStage('speaking');
@@ -334,12 +340,14 @@ export default function Interview() {
 
   // Submit (once) and advance. Retries reuse the accepted response.
   const submitAndAdvance = useCallback(async (id, turnQuestion) => {
+    if (guard.isTerminated()) return;
     const pending = pendingRef.current || {};
     if (!responseIdRef.current) {
       const saved = turnQuestion.kind === 'coding'
         ? await api.submitCode(id, {
           questionIndex: turnQuestion.index, language: pending.language, code: pending.code,
           answerSignals: pending.signals || null,
+          recording: answerRecordingPositionRef.current ?? null,
         })
         : await api.submitAnswer(id, {
           questionIndex: turnQuestion.index,
@@ -347,9 +355,7 @@ export default function Interview() {
           candidateAnswer: pending.text ?? '',
           videoBlob: null,
           visionMetrics: answerVisionRef.current,
-          recording: sessionRef.current
-            ? { part: sessionRef.current.part, start: answerStartRef.current, end: sessionRef.current.elapsedSeconds() }
-            : null,
+          recording: answerRecordingPositionRef.current ?? null,
           answerSignals: pending.signals || null,
         });
       if (!saved?.response_id) throw new Error('Missing response identifier');
@@ -359,6 +365,8 @@ export default function Interview() {
         ? { ...item, answer, completed: true, response_id: saved.response_id, evaluation: saved.evaluation }
         : item)));
     }
+    await guard.flushEvents({ required: true });
+    if (guard.isTerminated()) return;
     const result = await api.nextQuestion(id, responseIdRef.current);
     if (!result.is_complete && !result.next_question?.question) throw new Error('Missing next question');
     setResponses((current) => current.map((item, index) => (index === current.length - 1
@@ -375,13 +383,21 @@ export default function Interview() {
     setMaxTurns(result.max_turns);
     setResponses((current) => [...current, { ...result.next_question, answer: '', completed: false }]);
     await askQuestion(result.next_question, id);
-  }, [askQuestion, finishInterview]);
+  }, [askQuestion, finishInterview, guard]);
 
   // Ends the current answer: transcribe (voice) and hand over to grading.
   // `codeAnswer` ({ language, code }) comes from the VPL on coding turns.
   const finishAnswer = useCallback(async (codeAnswer = null) => {
     if (busyRef.current || !interviewId || !question || guard.isTerminated()) return;
     busyRef.current = true;
+    // Close the answer before transcription or grading can add processing time
+    // to its recording or attribute new observations to the completed turn.
+    if (answerRecordingPositionRef.current === undefined) {
+      answerRecordingPositionRef.current = sessionRef.current
+        ? Object.freeze({ part: sessionRef.current.part, start: answerStartRef.current, end: sessionRef.current.elapsedSeconds(), observationStart: answerObservationStartRef.current })
+        : null;
+    }
+    guard.endAnswer();
     setFlowError('');
     setStage('processing');
     try {
@@ -431,6 +447,7 @@ export default function Interview() {
       }
       await submitAndAdvance(interviewId, question);
     } catch {
+      if (guard.isTerminated()) return;
       setFlowError(responseIdRef.current
         ? 'Your answer is saved. Retry to continue to the next question.'
         : 'We could not save your answer. Check your connection and retry; nothing has been lost.');
@@ -463,6 +480,7 @@ export default function Interview() {
   const begin = useCallback(async () => {
     if (!interviewId || busyRef.current) return;
     beganAtRef.current = Date.now();
+    guard.endAnswer();
     const resumed = resumeRef.current;
     const part = (resumed?.recording_parts?.length ? Math.max(...resumed.recording_parts) : 0) + 1;
     if (streamRef.current) {
@@ -735,13 +753,15 @@ export default function Interview() {
                   <span className="text-ink-4">·</span>
                   <Badge>{question?.difficulty?.replace(/^./, (c) => c.toUpperCase())}</Badge>
                   {coding && <Badge tone="ink"><Code2 className="h-3 w-3" /> Coding</Badge>}
-                  {question?.is_follow_up && <Badge tone="ink">AI Follow-up</Badge>}
+                  {verification && <Badge tone="ink">Knowledge Verification</Badge>}
+                  {question?.is_follow_up && !verification && <Badge tone="ink">AI Follow-up</Badge>}
                   {question?.topic && <span className="text-ink-3">{question.topic}</span>}
                 </div>
                 <h2 className="mt-4 font-serif text-[1.5rem] leading-snug text-ink sm:text-[1.75rem]">
                   {coding ? question.coding?.title : question?.question}
                 </h2>
                 {coding && <p className="mt-2 text-sm text-ink-2">{question.coding?.statement}</p>}
+                {verification && <p className="mt-2 text-sm text-ink-2">Apply a concept from your previous answer to this question.</p>}
               </div>
             )}
 

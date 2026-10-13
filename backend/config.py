@@ -34,6 +34,15 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = _env_str(name).lower()
+    if value in {"true", "1", "on", "yes"}:
+        return True
+    if value in {"false", "0", "off", "no"}:
+        return False
+    return default
+
+
 def _env_list(name: str, default: list[str]) -> list[str]:
     """Return a comma-separated setting as a list of non-empty items."""
     raw = _env_str(name)
@@ -105,6 +114,12 @@ PROCTORING_MAX_VIOLATIONS = _env_int("PROCTORING_MAX_VIOLATIONS", 3)
 # Staying outside the interview (another tab, window or app) this many
 # seconds in one go ends the interview at once.
 PROCTORING_MAX_AWAY_SECONDS = _env_int("PROCTORING_MAX_AWAY_SECONDS", 5)
+
+# Knowledge verification replaces a scheduled Standard turn. The policy
+# never lowers the multi-family threshold below 60 or permits over two probes.
+COUNTER_CHEATING_ENABLED = _env_bool("COUNTER_CHEATING_ENABLED", True)
+COUNTER_CHEATING_THRESHOLD = max(60, min(100, _env_int("COUNTER_CHEATING_THRESHOLD", 60)))
+COUNTER_CHEATING_MAX_CHALLENGES = max(0, min(2, _env_int("COUNTER_CHEATING_MAX_CHALLENGES", 2)))
 
 # Coding round (VPL). Code runs in code_runner.py: in this process for local
 # testing, or in the separate locked-down runner container when

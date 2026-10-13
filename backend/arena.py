@@ -141,7 +141,7 @@ def finalize(cur, interview, end_reason=None):
     cur.execute('SELECT * FROM interview_responses WHERE interview_id=%s AND evaluated_at IS NOT NULL '
                 'ORDER BY question_index;', (interview_id,))
     responses = cur.fetchall()
-    assessments, identity_summary = assessment.assess(cur, interview_id, responses)
+    assessments, identity_summary = assessment.assess(cur, interview_id, responses, interview_mode="game")
     adjusted = assessment.store(cur, responses, assessments)
     scores = list(adjusted.values()) + [0] * max(0, interview['max_turns'] - len(responses))
     score = sum(scores) / len(scores) if scores else 0

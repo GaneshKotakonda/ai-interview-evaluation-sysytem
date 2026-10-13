@@ -34,6 +34,9 @@ services:
     environment:
       DATABASE_URL: postgresql://interview:${POSTGRES_PASSWORD:-local-dev-password}@db:5432/interviews
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      COUNTER_CHEATING_ENABLED: ${COUNTER_CHEATING_ENABLED:-true}
+      COUNTER_CHEATING_THRESHOLD: ${COUNTER_CHEATING_THRESHOLD:-60}
+      COUNTER_CHEATING_MAX_CHALLENGES: ${COUNTER_CHEATING_MAX_CHALLENGES:-2}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-ai-evaluation-40c8a}
       CORS_ORIGINS: http://localhost:${WEB_PORT:-8080},http://127.0.0.1:${WEB_PORT:-8080}
       STT_MODEL: ${STT_MODEL:-base.en}

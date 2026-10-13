@@ -26,7 +26,7 @@ export function setAuthTokenProvider(provider) {
   authTokenProvider = provider;
 }
 
-async function request(url, { method = 'GET', json, formData } = {}, failureMessage) {
+async function request(url, { method = 'GET', json, formData, timeoutMs } = {}, failureMessage) {
   const options = { method, headers: {} };
   const token = await authTokenProvider();
   if (token) options.headers.Authorization = `Bearer ${token}`;
@@ -38,19 +38,26 @@ async function request(url, { method = 'GET', json, formData } = {}, failureMess
     options.body = formData;
   }
 
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    const error = new Error(failureMessage);
-    error.status = response.status;
-    try {
-      const body = await response.json();
-      if (typeof body?.detail === 'string') error.detail = body.detail;
-    } catch {
-      // Non-JSON error body (proxy page, empty body): keep the generic message.
+  const controller = timeoutMs ? new AbortController() : null;
+  if (controller) options.signal = controller.signal;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const error = new Error(failureMessage);
+      error.status = response.status;
+      try {
+        const body = await response.json();
+        if (typeof body?.detail === 'string') error.detail = body.detail;
+      } catch {
+        // Non-JSON error body (proxy page, empty body): keep the generic message.
+      }
+      throw error;
     }
-    throw error;
+    return await response.json();
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
-  return response.json();
 }
 
 // File extension that matches what the browser actually recorded
@@ -148,6 +155,7 @@ export const api = {
       formData.append('recording_part', recording.part);
       formData.append('answer_start_seconds', recording.start);
       formData.append('answer_end_seconds', recording.end);
+      if (recording.observationStart != null) formData.append('observation_start_seconds', recording.observationStart);
     }
     if (answerSignals) {
       formData.append('answer_signals', JSON.stringify(answerSignals));
@@ -258,7 +266,7 @@ export const api = {
   // 6b. Proctoring: integrity events (leaving the interview, blocked actions).
   // `events`: [{ id, type, question_index, part, at, duration, details }].
   reportProctoringEvents(interviewId, events) {
-    return request(interviewPath(interviewId, 'proctoring'), { method: 'POST', json: { events } },
+    return request(interviewPath(interviewId, 'proctoring'), { method: 'POST', json: { events }, timeoutMs: 5000 },
       'Failed to record integrity event');
   },
 
@@ -307,10 +315,15 @@ export const api = {
   },
 
   // 6h. Submit code: graded on every test (hidden ones too) plus a code review.
-  submitCode(interviewId, { questionIndex, language, code, answerSignals }) {
+  submitCode(interviewId, { questionIndex, language, code, answerSignals, recording }) {
     return request(interviewPath(interviewId, 'code/submit'), {
       method: 'POST',
-      json: { question_index: questionIndex, language, code, ...(answerSignals ? { answer_signals: answerSignals } : {}) },
+      json: {
+        question_index: questionIndex, language, code,
+        ...(answerSignals ? { answer_signals: answerSignals } : {}),
+        ...(recording ? { recording_part: recording.part, answer_start_seconds: recording.start, answer_end_seconds: recording.end,
+          ...(recording.observationStart != null ? { observation_start_seconds: recording.observationStart } : {}) } : {}),
+      },
     }, 'Failed to submit code');
   },
 

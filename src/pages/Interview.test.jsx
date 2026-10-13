@@ -108,6 +108,107 @@ async function startAndListen() {
   await screen.findByText('Listening');
 }
 
+function deferred() {
+  let resolve; let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+it('retains the question preparation boundary separately from the spoken recording start', async () => {
+  const questionSpeech = deferred();
+  session.elapsedSeconds.mockReturnValue(5);
+  speech.speak.mockImplementation((item) => item.item === 'question-1' ? questionSpeech.promise : Promise.resolve());
+  renderInterview();
+  await clickStart();
+  await waitFor(() => expect(speech.speak).toHaveBeenCalledWith(expect.objectContaining({ item: 'question-1' }), expect.any(String)));
+  session.elapsedSeconds.mockReturnValue(7);
+  act(() => scene.onEvent({ type: 'phone_detected', phase: 'start' }));
+  expect(api.reportProctoringEvents.mock.calls.flatMap(([, batch]) => batch).find((event) => event.type === 'phone_detected'))
+    .toMatchObject({ question_index: 1, at: 7 });
+  fireEvent.click(screen.getByRole('button', { name: 'Continue the interview' }));
+  session.elapsedSeconds.mockReturnValue(10);
+  await act(async () => { questionSpeech.resolve(); });
+  await screen.findByText('Listening');
+  session.elapsedSeconds.mockReturnValue(20);
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  await waitFor(() => expect(api.submitAnswer).toHaveBeenCalled());
+  expect(api.submitAnswer.mock.calls[0][1].recording).toEqual({ part: 1, start: 10, end: 20, observationStart: 5 });
+});
+
+it('awaits stored integrity evidence before advancing and retries using the accepted response', async () => {
+  const send = deferred();
+  api.reportProctoringEvents.mockReturnValueOnce(send.promise);
+  await startAndListen();
+  act(() => proctor.callbacks.onMinor({ id: 'phone-1', type: 'phone_detected', ...proctor.callbacks.context() }));
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  await waitFor(() => expect(api.submitAnswer).toHaveBeenCalledTimes(1));
+  expect(api.nextQuestion).not.toHaveBeenCalled();
+  await act(async () => { send.reject(new Error('offline')); });
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry Next Question' }));
+  await screen.findByText(next.question);
+  expect(api.submitAnswer).toHaveBeenCalledTimes(1);
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(1);
+  expect(api.nextQuestion).toHaveBeenCalledWith('session-1', 'response-1');
+  expect(api.reportProctoringEvents.mock.calls[1][1]).toEqual(api.reportProctoringEvents.mock.calls[0][1]);
+});
+
+it('closes observation and recording boundaries before transcription and preserves them on retry', async () => {
+  const transcription = deferred();
+  api.transcribeAnswer.mockReturnValueOnce(transcription.promise);
+  api.submitAnswer.mockRejectedValueOnce(new Error('offline'));
+  session.elapsedSeconds.mockReturnValue(10);
+  await startAndListen();
+  expect(proctor.callbacks.context().question_index).toBe(1);
+  session.elapsedSeconds.mockReturnValue(20);
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  await waitFor(() => expect(api.transcribeAnswer).toHaveBeenCalled());
+  expect(proctor.callbacks.context().question_index).toBeNull();
+  act(() => scene.onEvent({ type: 'book_detected', phase: 'start' }));
+  session.elapsedSeconds.mockReturnValue(80);
+  await act(async () => { transcription.resolve({ transcript: 'I use resource URLs.' }); });
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry Submission' }));
+  await screen.findByText(next.question);
+  expect(api.submitAnswer.mock.calls.map(([, answer]) => answer.recording)).toEqual([
+    { part: 1, start: 10, end: 20, observationStart: 10 }, { part: 1, start: 10, end: 20, observationStart: 10 },
+  ]);
+  const events = api.reportProctoringEvents.mock.calls.flatMap(([, batch]) => batch);
+  expect(events.find((e) => e.type === 'book_detected').question_index).toBeNull();
+  expect(proctor.callbacks.context().question_index).toBe(2);
+});
+
+it('shows neutral knowledge verification and uses the normal question TTS and spoken answer flow', async () => {
+  const verify = { ...next, kind: 'verify', question: 'Apply your caching choice to a stale update.', verification_meta: { internal_reason: 'PRIVATE_TRIGGER', risk_score: 70 } };
+  api.nextQuestion.mockResolvedValueOnce({ next_question: verify, current_turn: 2, max_turns: 2, is_complete: false });
+  await startAndListen();
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  expect(await screen.findByText('Knowledge Verification')).toBeInTheDocument();
+  expect(screen.getByText(/apply a concept from your previous answer/i)).toBeInTheDocument();
+  expect(screen.queryByText('AI Follow-up')).not.toBeInTheDocument();
+  expect(screen.queryByText(/PRIVATE_TRIGGER|risk_score/)).not.toBeInTheDocument();
+  expect(speech.speak).toHaveBeenCalledWith({ interviewId: 'session-1', item: 'question-2' }, expect.stringContaining(verify.question));
+  expect(screen.getByText('Listening')).toBeInTheDocument();
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+});
+
+it('leaves setup observations unassigned before a question is prepared', async () => {
+  renderInterview();
+  fireEvent.click(await screen.findByRole('button', { name: 'Start Interview' }));
+  await screen.findByRole('heading', { name: 'Before we begin' });
+  expect(proctor.callbacks.context().question_index).toBeNull();
+});
+
+it('keeps violation termination ahead of advancement when delivery reaches the server limit', async () => {
+  const send = deferred();
+  api.reportProctoringEvents.mockReturnValueOnce(send.promise);
+  await startAndListen();
+  act(() => proctor.callbacks.onMinor({ id: 'e', type: 'copy_blocked', ...proctor.callbacks.context() }));
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  await waitFor(() => expect(api.submitAnswer).toHaveBeenCalled());
+  await act(async () => { send.resolve({ violations: 3 }); });
+  expect(await screen.findByRole('heading', { name: 'Interview ended' })).toBeInTheDocument();
+  expect(api.nextQuestion).not.toHaveBeenCalled();
+});
+
 it('speaks the intro and question, then listens; Next transcribes and grades silently', async () => {
   await startAndListen();
   expect(speech.speak).toHaveBeenCalledWith({ interviewId: 'session-1', item: 'intro' }, expect.any(String));
@@ -121,7 +222,7 @@ it('speaks the intro and question, then listens; Next transcribes and grades sil
   await screen.findByText(next.question);
   expect(api.transcribeAnswer).toHaveBeenCalledWith('session-1', 1, expect.any(Blob));
   expect(api.submitAnswer).toHaveBeenCalledWith('session-1', expect.objectContaining({
-    candidateAnswer: 'Use resources and HTTP verbs.', recording: { part: 1, start: 12, end: 12 },
+    candidateAnswer: 'Use resources and HTTP verbs.', recording: { part: 1, start: 12, end: 12, observationStart: 12 },
   }));
   expect(api.nextQuestion).toHaveBeenCalledWith('session-1', 'response-1');
   expect(screen.getByText('Question 2 of 2')).toBeInTheDocument();
@@ -449,9 +550,10 @@ it('opens the VPL on a coding turn and submits the code', async () => {
   fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
   expect(await screen.findByText('VPL for Two Sum')).toBeInTheDocument();
   expect(answerRecording.stop).toHaveBeenCalledTimes(1); // no audio recording while coding
+  session.elapsedSeconds.mockReturnValue(45);
   fireEvent.click(screen.getByRole('button', { name: 'Submit solution' }));
   await waitFor(() => expect(api.submitCode).toHaveBeenCalledWith('session-1', expect.objectContaining({
-    questionIndex: 2, language: 'python', code: 'print(1)',
+    questionIndex: 2, language: 'python', code: 'print(1)', recording: { part: 1, start: 12, end: 45, observationStart: 12 },
   })));
   expect(api.nextQuestion).toHaveBeenLastCalledWith('session-1', 'code-1');
   await waitFor(() => expect(navigate).toHaveBeenCalledWith('/interview-complete'));

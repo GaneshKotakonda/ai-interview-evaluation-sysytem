@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
+import KnowledgeVerificationReport, { IntegrityTimeline } from '../components/KnowledgeVerificationReport';
 import {
   Badge, CountUp, EmptyState, LoadingBlock, Notice, PageHeader, Panel, SectionTitle, Spinner,
 } from '../components/ui';
@@ -407,7 +408,7 @@ function IdentitySection({ integrity, identity, interviewId, playerRef }) {
 }
 
 // Proctoring, identity and malpractice: the verdict and the evidence.
-function IntegrityPanel({ integrity, events, identity, interviewId, playerRef, i }) {
+function IntegrityPanel({ integrity, events, identity, verification, turns, interviewId, playerRef, i }) {
   if (!integrity) return null;
   const level = INTEGRITY_LEVELS[integrity.verdict] || INTEGRITY_LEVELS[integrity.level] || INTEGRITY_LEVELS.minor;
   const counts = integrity.counts || {};
@@ -417,7 +418,7 @@ function IntegrityPanel({ integrity, events, identity, interviewId, playerRef, i
   return (
     <Panel i={i} className="p-6 sm:p-7">
       <SectionTitle
-        title="Integrity"
+        title={<><span>Integrity</span> &amp; Knowledge Verification</>}
         description="Identity checks, other people or devices in view, other voices, reading detection and leaving the interview."
         action={<Badge tone={level.tone}>{level.label}</Badge>}
       />
@@ -440,26 +441,8 @@ function IntegrityPanel({ integrity, events, identity, interviewId, playerRef, i
         <Figure label="Gaze warnings" value={`${integrity.gaze_warnings ?? 0}×`} />
       </dl>
       <IdentitySection integrity={integrity} identity={identity} interviewId={interviewId} playerRef={playerRef} />
-      {events?.length > 0 && (
-        <ol className="mt-5 divide-y divide-line border-t border-line">
-          {events.map((event, index) => (
-            <li key={index} className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-[13px]">
-              <span className="flex items-center gap-2">
-                <span className={`h-1.5 w-1.5 rounded-full ${event.major ? 'bg-bad' : 'bg-warn'}`} />
-                <span className="text-ink">{event.label}</span>
-                {event.question_index && <span className="text-ink-3">· question {event.question_index}</span>}
-                {event.duration_seconds != null && event.major && <span className="text-ink-3">· {Math.round(event.duration_seconds)} s</span>}
-              </span>
-              {playerRef && event.recording_part && event.at_seconds != null ? (
-                <button type="button" className="num font-mono text-xs text-ink-2 underline decoration-line-strong underline-offset-4 hover:text-ink"
-                  onClick={() => playerRef.current?.play(event.recording_part, Math.max(0, event.at_seconds - 3))}>
-                  {clock(event.at_seconds)}
-                </button>
-              ) : event.at_seconds != null && <span className="num font-mono text-xs text-ink-3">{clock(event.at_seconds)}</span>}
-            </li>
-          ))}
-        </ol>
-      )}
+      <KnowledgeVerificationReport verification={integrity.verification} summary={verification} turns={turns} />
+      <IntegrityTimeline events={Array.isArray(integrity.verification?.timeline) ? integrity.verification.timeline : events} playerRef={playerRef} />
     </Panel>
   );
 }
@@ -577,7 +560,7 @@ function AdaptiveJourney({ turns, interviewId, playerRef }) {
       />
       <ol className="relative mt-7 space-y-8 before:absolute before:bottom-2 before:left-[11px] before:top-2 before:w-px before:bg-line">
         {turns.map((turn, index) => (
-          <li key={turn.response_id || turn.index || index} className="reveal relative pl-10" style={{ '--i': index + 4 }}>
+          <li id={`interview-question-${turn.index || index + 1}`} key={turn.response_id || turn.index || index} className="reveal relative scroll-mt-6 pl-10" style={{ '--i': index + 4 }}>
             <span className="num absolute left-0 top-0 grid h-6 w-6 place-items-center rounded-full border border-line-strong bg-surface font-mono text-[11px] text-ink-2">
               {turn.index || index + 1}
             </span>
@@ -762,6 +745,8 @@ export default function Report() {
 
       <IntegrityPanel
         integrity={report.integrity}
+        verification={report.verification}
+        turns={journey}
         events={report.proctoring_events}
         identity={report.identity}
         interviewId={report.interview_id || interviewId}

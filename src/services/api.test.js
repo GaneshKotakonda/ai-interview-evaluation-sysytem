@@ -216,6 +216,26 @@ describe('voice interview API', () => {
     expect([body.get('recording_part'), body.get('answer_start_seconds'), body.get('answer_end_seconds')]).toEqual(['2', '30.5', '75']);
   });
 
+  it('sends the separate question preparation boundary for spoken and coding answers', async () => {
+    const { api } = await import('./api');
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const recording = { part: 1, start: 15, end: 40, observationStart: 10 };
+    await api.submitAnswer('iv', { questionIndex: 2, candidateAnswer: 'A', recording });
+    expect(fetch.mock.calls[0][1].body.get('observation_start_seconds')).toBe('10');
+    await api.submitCode('iv', { questionIndex: 2, language: 'python', code: 'print(1)', recording });
+    expect(JSON.parse(fetch.mock.calls[1][1].body).observation_start_seconds).toBe(10);
+  });
+
+  it('sends the immutable coding answer position only when provided', async () => {
+    const { api } = await import('./api');
+    await api.submitCode('iv', { questionIndex: 2, language: 'python', code: 'print(1)', recording: { part: 2, start: 30.5, end: 75 } });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+      recording_part: 2, answer_start_seconds: 30.5, answer_end_seconds: 75,
+    });
+    await api.submitCode('iv', { questionIndex: 2, language: 'python', code: 'print(1)' });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).not.toHaveProperty('recording_part');
+  });
+
   it('uploads recording chunks and fetches speech and recordings', async () => {
     const { api } = await import('./api');
     await api.uploadRecordingChunk('iv', 1, 3, new Blob(['v'], { type: 'video/webm' }));
@@ -243,7 +263,32 @@ describe('proctoring API', () => {
     vi.resetModules();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }));
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('aborts a stuck integrity delivery after five seconds so the barrier can retry', async () => {
+    vi.useFakeTimers();
+    const { api } = await import('./api');
+    fetch.mockImplementation((_url, { signal }) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }));
+    const delivery = api.reportProctoringEvents('iv', [{ id: 'phone-1', type: 'phone_detected' }]);
+    const rejected = expect(delivery).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(5000);
+    await rejected;
+    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it('clears the integrity timeout on success without aborting the request', async () => {
+    vi.useFakeTimers();
+    const { api } = await import('./api');
+    await api.reportProctoringEvents('iv', []);
+    const signal = fetch.mock.calls[0][1].signal;
+    expect(signal).toBeDefined();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(signal.aborted).toBe(false);
+    await api.nextQuestion('iv', 'r');
+    expect(fetch.mock.calls[1][1].signal).toBeUndefined();
+  });
 
   it('reports integrity events and completes early only when asked', async () => {
     const { api } = await import('./api');

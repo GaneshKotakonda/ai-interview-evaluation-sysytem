@@ -12,6 +12,10 @@ client retry after a network failure gets the original result back.
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
+
+import assessment
+import config
 
 from fastapi import HTTPException
 
@@ -52,6 +56,7 @@ def public_question(question):
         "topic": question["topic"],
         "kind": question.get("kind") or "spoken",
         **({"coding": question["coding"]} if question.get("coding") else {}),
+        **({"is_verification": True} if question.get("kind") == "verify" else {}),
         **({"boss_round": True} if question.get("boss_round") else {}),
     }
 
@@ -101,14 +106,15 @@ def store_question(cur, interview_id, turn, content):
     cur.execute(
         """INSERT INTO interview_questions
            (interview_id, question_index, question_text, difficulty, is_follow_up,
-            topic, adaptive_reason, rubric_points, boss_round, kind, coding, coding_private)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *;""",
+            topic, adaptive_reason, rubric_points, boss_round, kind, coding, coding_private, verification_meta)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *;""",
         (interview_id, turn, content["question"], content["difficulty"],
          content["is_follow_up"], content["topic"], content["adaptive_reason"],
          json.dumps(content["rubric_points"]), content.get("boss_round", False),
          content.get("kind", "spoken"),
          json.dumps(content["coding"]) if content.get("coding") else None,
-         json.dumps(content["coding_private"]) if content.get("coding_private") else None),
+         json.dumps(content["coding_private"]) if content.get("coding_private") else None,
+         json.dumps(content["verification_meta"]) if content.get("verification_meta") else None),
     )
     question = cur.fetchone()
     # One batched embedding request for all rubric points (see get_embeddings).
@@ -167,7 +173,7 @@ def transcript_for_turn(cur, interview_id, question_index):
 
 
 def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision_metrics=None,
-                       recording=None, answer_signals=None):
+                       recording=None, answer_signals=None, submitted_at=None):
     """Embed, retrieve rubric matches, grade with Gemini and persist one answer.
 
     Pipeline: answer embedding → cosine search over this question's rubric
@@ -205,12 +211,17 @@ def evaluate_and_store(conn, cur, interview, question, answer, video_url, vision
     spoken = transcript_for_turn(cur, interview["id"], question["question_index"]) or {}
     return insert_response(cur, interview, question, answer, evaluation, vector=vector, similarity=similarity,
                            fillers=fillers, spoken=spoken, video_url=video_url, vision_metrics=vision_metrics,
-                           recording=recording, answer_signals=answer_signals)
+                           recording=recording, answer_signals=answer_signals, submitted_at=submitted_at)
 
 
 def insert_response(cur, interview, question, answer, evaluation, *, vector=None, similarity=0.0, fillers=None,
-                    spoken=None, video_url=None, vision_metrics=None, recording=None, answer_signals=None):
+                    spoken=None, video_url=None, vision_metrics=None, recording=None, answer_signals=None, submitted_at=None):
     """Persist one graded answer with a copy of the question metadata."""
+    submitted_at = submitted_at or datetime.now(timezone.utc)
+    verification = None
+    if question.get("kind") == "verify":
+        from counter_cheating import verification_result
+        verification = verification_result(question, {**evaluation, "evaluated_at": datetime.now(timezone.utc)})
     spoken = spoken or {}
     fillers = fillers or nlp_evaluator.count_filler_words(answer)
     speech_metrics = spoken.get("speech_metrics")
@@ -225,9 +236,9 @@ def insert_response(cur, interview, question, answer, evaluation, *, vector=None
            evaluation_source, evaluated_at,
            criteria_scores, transcript, transcript_source, speech_metrics, vision_metrics, audio_path,
            recording_part, answer_start_seconds, answer_end_seconds, answer_signals, content_signals,
-           coding_result)
+           coding_result, submitted_at, verification_result, observation_start_seconds)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),
-                   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            RETURNING *;""",
         (str(interview["id"]), str(question["id"]), question["question_index"],
          question["question_text"], answer, vector or None, similarity, video_url,
@@ -245,7 +256,9 @@ def insert_response(cur, interview, question, answer, evaluation, *, vector=None
          (recording or {}).get("part"), (recording or {}).get("start"), (recording or {}).get("end"),
          json.dumps(answer_signals) if answer_signals else None,
          json.dumps(evaluation["content_signals"]) if evaluation.get("content_signals") else None,
-         json.dumps(coding_result) if coding_result else None),
+         json.dumps(coding_result) if coding_result else None, submitted_at,
+         json.dumps(verification, default=str) if verification else None,
+         (recording or {}).get("observation_start")),
     )
     return cur.fetchone()
 
@@ -288,6 +301,34 @@ def advance(cur, interview, response_id=None):
     if response["evaluated_at"] is None:
         raise HTTPException(409, "Answer evaluation is not yet available.")
 
+    challenge = None
+    parent_question = None
+    if interview.get("interview_mode") == "standard" and config.COUNTER_CHEATING_ENABLED:
+        from counter_cheating import decide
+        evidence = assessment.load_evidence(cur, str(interview["id"]))
+        assessed = assessment.assess_response(response, evidence)
+        events = assessment.events_for_response(response, evidence, strict_boundary=True)
+        cur.execute("SELECT * FROM interview_questions WHERE id = %s;", (str(response["question_id"]),))
+        parent_question = cur.fetchone() or {}
+        cur.execute("SELECT * FROM interview_questions WHERE interview_id = %s AND kind = 'verify' ORDER BY question_index;",
+                    (str(interview["id"]),))
+        challenges = cur.fetchall()
+        cur.execute("""SELECT r.*, q.kind FROM interview_responses r
+                       JOIN interview_questions q ON q.id = r.question_id
+                       WHERE r.interview_id = %s AND r.question_index < %s ORDER BY r.question_index DESC;""",
+                    (str(interview["id"]), response["question_index"]))
+        recent = cur.fetchall()
+        decision = decide(response, assessed, events, recent, challenges,
+                          interview_mode=interview["interview_mode"], current_turn=interview["current_turn"],
+                          max_turns=interview["max_turns"], question=parent_question)
+        cur.execute("UPDATE interview_responses SET integrity = COALESCE(integrity, '{}'::jsonb) || %s::jsonb WHERE id = %s;",
+                    (json.dumps({"counter_cheating": decision}, default=str), str(response["id"])))
+        if decision["trigger_verification"]:
+            challenge = decision
+        logger.info("Counter-cheating policy=%s interview=%s response=%s risk=%s trigger=%s suppression=%s",
+                    decision["policy_version"], interview["id"], response["id"], decision["risk_score"],
+                    decision["trigger_verification"], decision.get("suppression_reason"))
+
     # Step C: Deterministic policy, then Arena/final-turn overrides.
     adaptation = adaptation_for(response)
     final_turn = interview["current_turn"] >= interview["max_turns"]
@@ -311,7 +352,22 @@ def advance(cur, interview, response_id=None):
             (str(interview["id"]),),
         )
         history = cur.fetchall()
-        if interview.get("coding_round") and turn + 1 in coding.coding_turns(interview["max_turns"]) and not boss_round:
+        if challenge:
+            content = gemini_service.generate_verification_question(
+                role_title=interview["role_title"], previous_question=response["question_text"],
+                candidate_answer=(response["candidate_answer"] or "")[:8000],
+                previous_topic=response["topic"], current_difficulty=adaptation["next_difficulty"],
+                rubric_points=parent_question.get("rubric_points") or [],
+                strengths=response.get("strengths") or [], missing_concepts=response.get("missing_concepts") or [],
+                recent_history=history, previous_was_coding=parent_question.get("kind") == "coding",
+            )
+            content["verification_meta"] = {**challenge, "parent_response_id": str(response["id"]),
+                "parent_question_index": response["question_index"],
+                "verification_target": content["verification_target"], "challenge_type": content["challenge_type"],
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "recording_part": response.get("recording_part"), "at_seconds": response.get("answer_end_seconds")}
+            adaptation.update(is_follow_up=True, reason="Knowledge verification challenge")
+        elif interview.get("coding_round") and turn + 1 in coding.coding_turns(interview["max_turns"]) and not boss_round:
             content = coding.question_content(cur, interview, adaptation["next_difficulty"])
         else:
             content = None
@@ -378,7 +434,7 @@ def report_turns(cur, interview_id):
                   r.next_result, r.criteria_scores, r.candidate_answer, r.transcript,
                   r.transcript_source, r.speech_metrics, r.vision_metrics, r.video_url, r.audio_path,
                   r.recording_part, r.answer_start_seconds, r.answer_end_seconds, r.integrity,
-                  r.coding_result, q.kind, q.coding->>'title' AS coding_title
+                  r.coding_result, r.verification_result, q.kind, q.coding->>'title' AS coding_title
            FROM interview_responses r
            LEFT JOIN interview_questions q ON q.id = r.question_id
            WHERE r.interview_id = %s
@@ -413,6 +469,7 @@ def report_turns(cur, interview_id):
             # Integrity flags and any score penalty (set when the interview completed).
             "integrity": row.get("integrity"),
             "kind": row.get("kind") or "spoken",
+            "verification_result": row.get("verification_result"),
             "coding_title": row.get("coding_title"),
             "coding_result": row.get("coding_result"),
         })

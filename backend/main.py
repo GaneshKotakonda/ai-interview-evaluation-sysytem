@@ -47,6 +47,7 @@ import shutil
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager, contextmanager
 from typing import Literal, Optional
 
@@ -57,6 +58,7 @@ from pydantic import BaseModel, Field
 
 import config  # loads backend/.env before the modules below read settings
 import adaptive_service
+import verification_report
 import arena
 import auth
 from auth import AuthUser
@@ -331,6 +333,7 @@ def completion_response(report, comp=None):
             "weights": report.get("scoring_weights"),
         },
         "integrity": report.get("integrity"),
+        "verification": verification_report.counts((report.get("integrity") or {}).get("verification")),
         "completion": comp,
         "insufficient_responses": insufficient,
     }
@@ -481,14 +484,17 @@ def _parse_signals(raw: Optional[str]) -> Optional[dict]:
         return None
 
 
-def _recording_position(part, start, end) -> Optional[dict]:
+def _recording_position(part, start, end, observation_start=None) -> Optional[dict]:
     """Where an answer sits in the session recording; None when invalid."""
     numbers = (int, float)
     if not (isinstance(part, int) and isinstance(start, numbers) and isinstance(end, numbers)):
         return None
     if not (1 <= part <= 50 and 0 <= start <= end <= 24 * 60 * 60):
         return None
-    return {"part": part, "start": round(start, 2), "end": round(end, 2)}
+    position = {"part": part, "start": round(start, 2), "end": round(end, 2)}
+    if isinstance(observation_start, numbers) and not isinstance(observation_start, bool) and 0 <= observation_start <= start:
+        position["observation_start"] = round(observation_start, 2)
+    return position
 
 
 @app.post("/api/interviews/{interview_id}/submit-answer")
@@ -503,9 +509,11 @@ def submit_answer(
     answer_start_seconds: Optional[float] = Form(None),
     answer_end_seconds: Optional[float] = Form(None),
     answer_signals: Optional[str] = Form(None),
+    observation_start_seconds: Optional[float] = Form(None),
     user: AuthUser = Depends(auth.current_user),
 ):
-    recording = _recording_position(recording_part, answer_start_seconds, answer_end_seconds)
+    submitted_at = datetime.now(timezone.utc)
+    recording = _recording_position(recording_part, answer_start_seconds, answer_end_seconds, observation_start_seconds)
     signals = _parse_signals(answer_signals)
     with transaction("Could not save and evaluate this answer. Please retry.") as (conn, cur):
         interview = owned_interview(cur, interview_id, user)
@@ -536,7 +544,7 @@ def submit_answer(
         response = adaptive_service.evaluate_and_store(
             conn, cur, interview, question, candidate_answer, video_url,
             vision_metrics=_parse_vision(vision_metrics), recording=recording,
-            answer_signals=signals,
+            answer_signals=signals, submitted_at=submitted_at,
         )
         return adaptive_service.submission_result(response)
 
@@ -876,7 +884,8 @@ def complete_and_evaluate_interview(
         integrity_summary = integrity.summarize(cur.fetchall(), vision_summary, ended_early)
         decision = malpractice.verdict(list(assessments.values()), identity_summary["face_mismatch_events"],
                                        integrity_summary["level"], len(adaptive_responses))
-        integrity_summary.update(decision, identity=identity_summary, score_before_integrity=overall)
+        integrity_summary.update(decision, identity=identity_summary, score_before_integrity=overall,
+                                 verification=verification_report.build(cur, interview))
         if decision["verdict"] == "invalid":
             overall = 0
 
@@ -1492,6 +1501,10 @@ class CodeRequest(BaseModel):
     code: str = Field(max_length=code_runner.MAX_CODE_BYTES)
     custom_input: Optional[str] = Field(default=None, max_length=20000)
     answer_signals: Optional[dict] = None
+    recording_part: Optional[int] = Field(default=None, ge=1, le=50)
+    answer_start_seconds: Optional[float] = Field(default=None, ge=0, le=86400)
+    answer_end_seconds: Optional[float] = Field(default=None, ge=0, le=86400)
+    observation_start_seconds: Optional[float] = Field(default=None, ge=0, le=86400)
 
 
 MAX_RUNS_PER_QUESTION = 40
@@ -1544,6 +1557,7 @@ def run_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depends(a
 
 @app.post("/api/interviews/{interview_id}/code/submit")
 def submit_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depends(auth.current_user)):
+    submitted_at = datetime.now(timezone.utc)
     # Step A: validate without holding a lock; replay an accepted submission.
     with transaction("Could not submit the code. Please retry.") as (_conn, cur):
         cur.execute("SELECT * FROM interview_questions WHERE interview_id = %s AND question_index = %s;",
@@ -1576,6 +1590,8 @@ def submit_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depend
         response = adaptive_service.insert_response(
             cur, interview, question, answer, evaluation,
             fillers=nlp_evaluator.count_filler_words(""), answer_signals=malpractice.sanitize_signals(payload.answer_signals),
+            recording=_recording_position(payload.recording_part, payload.answer_start_seconds, payload.answer_end_seconds, payload.observation_start_seconds),
+            submitted_at=submitted_at,
         )
         return {**adaptive_service.submission_result(response), "coding": _public_coding(response)}
 

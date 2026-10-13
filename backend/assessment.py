@@ -9,58 +9,83 @@ import json
 import malpractice
 
 
-def assess(cur, interview_id: str, responses: list) -> tuple[dict, dict]:
-    """Per-answer integrity assessments (keyed by question index) and an
-    identity summary, from stored checks, events and browser signals."""
+def load_evidence(cur, interview_id: str) -> dict:
+    """Load recorded evidence once, shared by immediate and final assessment."""
     cur.execute("SELECT question_index, words FROM answer_transcripts WHERE interview_id = %s;", (interview_id,))
     words = {row["question_index"]: row["words"] for row in cur.fetchall()}
-    cur.execute("SELECT event_type, question_index FROM proctoring_events WHERE interview_id = %s;",
-                (interview_id,))
-    events: dict = {}
-    for row in cur.fetchall():
-        events.setdefault(row["question_index"], []).append(row["event_type"])
+    cur.execute(
+        """SELECT event_type, question_index, id, client_event_id, recording_part,
+                  at_seconds, duration_seconds, created_at, details
+           FROM proctoring_events WHERE interview_id = %s ORDER BY created_at, id;""", (interview_id,))
+    events = cur.fetchall()
     cur.execute(
         """SELECT kind, question_index, verdict, similarity, details FROM identity_checks
-           WHERE interview_id = %s ORDER BY created_at;""",
-        (interview_id,),
-    )
+           WHERE interview_id = %s ORDER BY created_at;""", (interview_id,))
     checks = cur.fetchall()
-    voice = {}
-    for check in checks:
-        if check["kind"] == "voice":
-            voice[check["question_index"]] = check["details"] or {"verdict": check["verdict"]}
     cur.execute("SELECT 1 FROM identity_profiles WHERE interview_id = %s;", (interview_id,))
-    enrolled = cur.fetchone() is not None
+    return {"words": words, "events": events, "checks": checks, "enrolled": cur.fetchone() is not None}
 
-    assessments = {}
-    for response in responses:
-        index = response["question_index"]
-        answer_events = events.get(index, [])
-        reading = malpractice.reading_assessment(
-            words.get(index), response.get("candidate_answer") or "", response.get("speech_metrics"),
-            response.get("answer_signals"), response.get("content_signals"),
-        )
-        assessment = malpractice.assess_answer(
-            voice_check=voice.get(index), face_mismatch="face_mismatch" in answer_events,
-            events=answer_events, signals=response.get("answer_signals"), reading=reading,
-        )
-        assessment["voice"] = {k: voice[index].get(k) for k in ("verdict", "similarity")} if index in voice else None
-        assessments[index] = assessment
+
+def events_for_response(response, evidence, strict_boundary=False):
+    """Attribute observations to an answer, never to its grading/processing time.
+
+    Recording offsets allow delayed delivery of observations made before the
+    answer closed. Untimed observations must have arrived before the server
+    accepted the submission. Old reports retain their original attribution.
+    """
+    rows = [e for e in evidence.get("events", []) if e.get("question_index") == response["question_index"]]
+    if not strict_boundary:
+        return rows
+    part, start, end = (response.get(k) for k in ("recording_part", "answer_start_seconds", "answer_end_seconds"))
+    if response.get("observation_start_seconds") is not None:
+        start = response["observation_start_seconds"]
+    cutoff = response.get("submitted_at")
+    eligible = []
+    for event in rows:
+        if part is not None and start is not None and end is not None and event.get("at_seconds") is not None:
+            if event.get("recording_part") == part and start <= event["at_seconds"] <= end:
+                eligible.append(event)
+        elif cutoff is not None and event.get("created_at") is not None:
+            if event["created_at"] <= cutoff:
+                eligible.append(event)
+    return eligible
+
+
+def assess_response(response, evidence):
+    """Pure interpretation used for both the Challenge Engine and penalties."""
+    index = response["question_index"]
+    strict = response.get("submitted_at") is not None and evidence.get("interview_mode") != "game"
+    events = events_for_response(response, evidence, strict_boundary=strict)
+    kinds = [event["event_type"] for event in events]
+    voice = None
+    for check in evidence.get("checks", []):
+        if check["kind"] == "voice" and check["question_index"] == index:
+            voice = {"verdict": check["verdict"], "similarity": check.get("similarity"), **(check.get("details") or {})}
+    reading = malpractice.reading_assessment(
+        evidence.get("words", {}).get(index), response.get("candidate_answer") or "", response.get("speech_metrics"),
+        response.get("answer_signals"), response.get("content_signals"))
+    result = malpractice.assess_answer(voice_check=voice, face_mismatch="face_mismatch" in kinds,
+                                      events=kinds, signals=response.get("answer_signals"), reading=reading)
+    result["voice"] = {k: voice.get(k) for k in ("verdict", "similarity")} if voice else None
+    return result
+
+
+def assess(cur, interview_id: str, responses: list, interview_mode="standard") -> tuple[dict, dict]:
+    evidence = load_evidence(cur, interview_id)
+    evidence["interview_mode"] = interview_mode
+    assessments = {r["question_index"]: assess_response(r, evidence) for r in responses}
 
     def tally(kind):
-        counts: dict = {}
-        for check in checks:
+        counts = {}
+        for check in evidence["checks"]:
             if check["kind"] == kind:
                 counts[check["verdict"]] = counts.get(check["verdict"], 0) + 1
         return counts
 
-    identity_summary = {
-        "enrolled": enrolled,
-        "voice_checks": tally("voice"),
-        "face_checks": tally("face"),
-        "face_mismatch_events": sum(1 for kinds in events.values() for k in kinds if k == "face_mismatch"),
+    return assessments, {
+        "enrolled": evidence["enrolled"], "voice_checks": tally("voice"), "face_checks": tally("face"),
+        "face_mismatch_events": sum(e["event_type"] == "face_mismatch" for e in evidence["events"]),
     }
-    return assessments, identity_summary
 
 
 def store(cur, responses: list, assessments: dict) -> dict:
@@ -73,6 +98,7 @@ def store(cur, responses: list, assessments: dict) -> dict:
         cur.execute(
             "UPDATE interview_responses SET integrity = %s WHERE id = %s;",
             (json.dumps({
+                **(response.get("integrity") or {}),
                 "flags": result["flags"], "action": result["action"],
                 "reading": {key: result["reading"][key] for key in ("level", "score", "evidence")},
                 "voice": result["voice"],

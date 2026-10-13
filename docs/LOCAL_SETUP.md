@@ -41,7 +41,7 @@ Then load the tables (from the repository folder; enter the password you just ch
 psql "postgresql://interview_app:choose-a-password@localhost:5432/interview_eval" -v ON_ERROR_STOP=1 -f schema.sql
 ```
 
-`schema.sql` is safe to run again at any time; do that after every `git pull` so new tables and columns are added.
+`schema.sql` is rerunnable; apply it after every `git pull` so new tables and columns are added to the existing database. Knowledge Verification adds nullable metadata/result/submission-time columns and a uniqueness index. Keep the existing database and data; recreating it is not required. The [feature guide](COUNTER_CHEATING.md#apply-the-schema-while-preserving-data) also gives the equivalent Docker command.
 
 ## 4. Configure the backend
 
@@ -57,6 +57,8 @@ GEMINI_API_KEY=your-own-key
 ```
 
 Leave `CODE_RUNNER_URL` empty: on your computer code runs locally in a temporary folder with time limits and without access to your secrets. Never commit `backend/.env`; it is git-ignored.
+
+Knowledge Verification is enabled by default for Standard interviews. Optional settings are `COUNTER_CHEATING_ENABLED=true`, `COUNTER_CHEATING_THRESHOLD=60` (clamped to 60–100), and `COUNTER_CHEATING_MAX_CHALLENGES=2` (clamped to 0–2). Restart the backend after changes. See [the exact policy](COUNTER_CHEATING.md#exact-issuance-policy); ordinary gaze or latency alone never triggers a challenge.
 
 ## 5. Install and start the backend
 
@@ -97,8 +99,9 @@ Open http://localhost:5173 in Chrome or Edge, sign up with any email and passwor
 | Voice interview | Answer out loud; 3 seconds of silence moves on, or select Next |
 | Coding round (VPL) | Keep "Include a coding round" ticked on Readiness: questions 2 and 4 open the code editor. Run the examples, then submit |
 | Proctoring | Alt+Tab away and come back: warning. Stay away 5 seconds: the interview ends. 3 warnings also end it |
-| Malpractice | Another person in view, a phone held up, someone else speaking, pasting text: each is a warning |
-| Report | Integrity section, coding results, recording playback |
+| Integrity observations | Test another person in view, a clearly visible phone, another speaker or pasted text separately; inspect which warnings/evidence are actually recorded. Physical phone accuracy has not yet been verified |
+| Knowledge Verification | Eligible stored evidence can produce a targeted next-turn question in Standard mode; use [the documented demo](COUNTER_CHEATING.md#professor-demo-and-validation) |
+| Report | Integrity & Knowledge Verification, evidence chain, raw verification results, coding results, recording playback |
 | Ranked Arena | Interview Arena → pick an area → play 6 levels → rating and rank; Leaderboard in the sidebar |
 
 To test the ranking with more than one player, sign up a second account (another email) and play an Arena with it.
@@ -108,7 +111,10 @@ To test the ranking with more than one player, sign up a second account (another
 ```bash
 npm test
 .venv/Scripts/python -m pytest backend
+npm run build
 ```
+
+On macOS/Linux, use `.venv/bin/python`. The actual PostgreSQL acceptance tests require `COUNTER_CHEATING_TEST_DATABASE_URL` pointing to a separate disposable database; otherwise they skip. Their fixture applies the schema twice and removes only its own test user and cascading records. Commands and the distinction between software-chain tests and physical camera validation are in [the feature guide](COUNTER_CHEATING.md#professor-demo-and-validation).
 
 ## 9. Troubleshooting
 
@@ -135,3 +141,5 @@ psql "postgresql://interview_app:choose-a-password@localhost:5432/interview_eval
 ```
 
 Then restart the backend and the frontend.
+
+The schema command preserves existing interviews and recording references; keep the current database and volumes when updating. For a full Docker setup, follow [commands.md](../commands.md#7-everyday-commands).

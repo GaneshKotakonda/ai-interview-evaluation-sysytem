@@ -54,7 +54,7 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
   const [enrolled, setEnrolled] = useState(false);
 
   const r = useRef({
-    interviewId: null, violations: 0, max: 3, maxAway: 5, queue: [], proctor: null, scene: null,
+    interviewId: null, violations: 0, max: 3, maxAway: 5, queue: [], flushing: null, answerIndex: undefined, proctor: null, scene: null,
     watching: false, terminated: false, warning: null, identity: { enabled: false, enrolled: false },
     attention: createAttentionTracker(), attentionTimer: null, gazeWarnings,
     snapshotTimer: null, snapshotBusy: false, awayTimer: null, outsideSince: null, warned: {}, openEpisodes: {},
@@ -73,18 +73,36 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
     const g = {};
     const s = r.current;
 
-    g.context = () => ({ question_index: turnRef?.current ?? null, part: null, at: null, ...(latest.current.context?.() || {}) });
+    // Pages opting into answer boundaries use an explicit index; Arena keeps
+    // its existing turn context until it adopts the same boundary methods.
+    g.context = () => ({
+      part: null, at: null, ...(latest.current.context?.() || {}),
+      question_index: s.answerIndex === undefined ? turnRef?.current ?? null : s.answerIndex,
+    });
 
-    g.flushEvents = async () => {
-      if (!s.interviewId || !s.queue.length || typeof api.reportProctoringEvents !== 'function') return;
-      const batch = s.queue.slice(0, 50);
-      try {
-        const result = await api.reportProctoringEvents(s.interviewId, batch);
-        s.queue = s.queue.slice(batch.length);
-        g.syncViolations(result?.violations);
-      } catch {
-        // Kept for the next attempt.
+    g.flushEvents = ({ required = false } = {}) => {
+      if (!s.flushing) {
+        if (!s.queue.length) return Promise.resolve();
+        if (!s.interviewId || typeof api.reportProctoringEvents !== 'function') {
+          return required ? Promise.reject(new Error('Integrity delivery unavailable')) : Promise.resolve();
+        }
+        s.flushing = (async () => {
+          while (s.queue.length) {
+            const batch = s.queue.slice(0, 50);
+            const result = await api.reportProctoringEvents(s.interviewId, batch);
+            // A duration update may share an event ID with an earlier entry.
+            // Acknowledge these exact entries, preserving arrivals during I/O.
+            const acknowledged = new Set(batch);
+            s.queue = s.queue.filter((event) => !acknowledged.has(event));
+            // syncViolations starts termination without awaiting it: terminate
+            // may join this delivery promise, which must finish independently.
+            g.syncViolations(result?.violations);
+          }
+        })().finally(() => { s.flushing = null; });
       }
+      // Detector callbacks send best effort; the advance barrier propagates
+      // failures, leaving all unacknowledged entries available for retry.
+      return required ? s.flushing : s.flushing.catch(() => {});
     };
 
     g.queueEvent = (event) => {
@@ -148,6 +166,11 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
       s.attention.reset();
       g.clearAttention();
     };
+    g.beginAnswer = (index) => {
+      s.answerIndex = index ?? null;
+      g.newAnswer();
+    };
+    g.endAnswer = () => { s.answerIndex = null; };
 
     g.handleServerResult = (result) => {
       if (!result?.event || s.terminated) return;
@@ -176,9 +199,10 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
       if (!s.interviewId || !s.watching || s.snapshotBusy || !s.identity.enrolled
           || typeof api.identitySnapshot !== 'function') return;
       s.snapshotBusy = true;
+      const observedContext = g.context();
       try {
         const photo = await captureFrame(videoRef.current, 480);
-        if (photo) g.handleServerResult(await api.identitySnapshot(s.interviewId, photo, g.context()));
+        if (photo) g.handleServerResult(await api.identitySnapshot(s.interviewId, photo, observedContext));
       } catch {
         // Best effort; the next snapshot follows shortly.
       } finally {
@@ -296,6 +320,7 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
 
     g.stop = () => {
       s.watching = false;
+      g.endAnswer();
       s.proctor?.stop();
       s.scene?.stop();
       s.scene = null;
