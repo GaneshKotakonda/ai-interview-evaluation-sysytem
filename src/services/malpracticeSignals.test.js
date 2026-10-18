@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  createAnswerSignals, createAttentionTracker, createEpisode, createLipSyncTracker, createSweepDetector, createTypingTracker,
-  gazeHorizontal, isVirtualDevice, mouthOpenness,
+  BACKGROUND_NOISE, createAnswerSignals, createAttentionTracker, createBackgroundNoiseTracker, createEpisode, createLipSyncTracker,
+  createSweepDetector, createTypingTracker, gazeHorizontal, isVirtualDevice, mouthOpenness,
 } from './malpracticeSignals';
 import { countDetections, frameStats } from './sceneMonitor';
 
@@ -180,5 +180,73 @@ describe('attention tracker', () => {
     const warns = run(tracker, missing, 0, 3000).filter((r) => r.warn);
     expect(warns.map((r) => r.warn)).toEqual(['show_face']);
     expect(warns[0].episodeStart).toBe(false);
+  });
+});
+
+describe('createBackgroundNoiseTracker', () => {
+  const QUIET = 0.0002;  // a normal room after noise suppression
+  const LOUD = 0.004;    // audible sound in the speech band
+  // Feed one camera-rate check (every 100 ms) from `from` to `to` ms;
+  // sample(t, k) returns the input for that check. Returns every result.
+  const feed = (tracker, from, to, sample) => {
+    const out = [];
+    for (let t = from, k = 0; t <= to; t += 100, k += 1) out.push({ t, ...tracker.update(t, sample(t, k)) });
+    return out;
+  };
+  const still = { facePresent: true, mouth: 0.1 };
+  const talking = (k) => ({ facePresent: true, mouth: k % 2 ? 0.2 : 0.1 });
+  const firstNoisy = (results) => results.find((r) => r.noisy)?.t ?? null;
+
+  it('stays quiet for a normal room, with the candidate silent or talking', () => {
+    const tracker = createBackgroundNoiseTracker();
+    expect(firstNoisy(feed(tracker, 0, 20000, () => ({ level: QUIET, ...still })))).toBeNull();
+    // The candidate answering: loud while talking, quiet in the pauses between phrases.
+    expect(firstNoisy(feed(tracker, 20100, 40000, (t, k) => ({ level: k % 10 < 7 ? LOUD : QUIET, ...talking(k) })))).toBeNull();
+  });
+
+  it('flags steady sound such as music, even while the candidate talks', () => {
+    const tracker = createBackgroundNoiseTracker();
+    const results = feed(tracker, 0, 6000, (t, k) => ({ level: LOUD, ...talking(k) }));
+    expect(firstNoisy(results)).toBe(BACKGROUND_NOISE.minWindowMs);
+    expect(results.at(-1)).toMatchObject({ noisy: true, steady: true });
+  });
+
+  it('flags someone talking in the background while the candidate is silent', () => {
+    const tracker = createBackgroundNoiseTracker();
+    // Conversation: 300 ms of speech, then a 200 ms gap, over and over.
+    const results = feed(tracker, 0, 6000, (t, k) => ({ level: k % 5 < 3 ? LOUD : QUIET, ...still }));
+    expect(firstNoisy(results)).not.toBeNull();
+    expect(results.at(-1)).toMatchObject({ noisy: true, steady: false, voices: true });
+  });
+
+  it('does not judge voices without a visible face, or key clicks while coding', () => {
+    const conversation = (t, k) => ({ level: k % 5 < 3 ? LOUD : QUIET });
+    expect(firstNoisy(feed(createBackgroundNoiseTracker(), 0, 8000, (t, k) => ({ ...conversation(t, k), facePresent: false })))).toBeNull();
+    expect(firstNoisy(feed(createBackgroundNoiseTracker(), 0, 8000, (t, k) => ({ ...conversation(t, k), ...still, typing: true })))).toBeNull();
+  });
+
+  it('ignores short sounds: a cough, a door, a few words', () => {
+    const tracker = createBackgroundNoiseTracker();
+    const results = feed(tracker, 0, 10000, (t) => ({ level: t >= 3000 && t < 4500 ? LOUD : QUIET, ...still }));
+    expect(firstNoisy(results)).toBeNull();
+  });
+
+  it('clears once the room is quiet again, without flickering at the edge', () => {
+    const tracker = createBackgroundNoiseTracker();
+    feed(tracker, 0, 6000, (t, k) => ({ level: k % 5 < 3 ? LOUD : QUIET, ...still }));
+    // Sound in a third of the moments: below the 50% needed to start, above the 25% to clear.
+    const thinning = feed(tracker, 6100, 12000, (t, k) => ({ level: k % 3 === 0 ? LOUD : QUIET, ...still }));
+    expect(thinning.every((r) => r.noisy)).toBe(true);
+    const quiet = feed(tracker, 12100, 20000, () => ({ level: QUIET, ...still }));
+    const cleared = quiet.find((r) => !r.noisy);
+    expect(cleared.t - 12100).toBeLessThanOrEqual(BACKGROUND_NOISE.windowMs);
+    expect(quiet.slice(quiet.indexOf(cleared)).every((r) => !r.noisy)).toBe(true);
+  });
+
+  it('starts again from nothing after reset', () => {
+    const tracker = createBackgroundNoiseTracker();
+    feed(tracker, 0, 5000, () => ({ level: LOUD, ...still }));
+    tracker.reset();
+    expect(tracker.update(5100, { level: LOUD, ...still }).noisy).toBe(false);
   });
 });

@@ -226,7 +226,7 @@ it('speaks the intro and question, then listens; Next transcribes and grades sil
     candidateAnswer: 'Use resources and HTTP verbs.', recording: { part: 1, start: 12, end: 12, observationStart: 12 },
   }));
   expect(api.nextQuestion).toHaveBeenCalledWith('session-1', 'response-1');
-  expect(screen.getByText('Question 2 of 2')).toBeInTheDocument();
+  expect(screen.getByText('Question 2')).toBeInTheDocument();
   expect(screen.getByText('AI Follow-up')).toBeInTheDocument();
   expect(speech.speak).toHaveBeenCalledWith({ interviewId: 'session-1', item: 'question-2' }, expect.any(String));
   // No scores are shown during the interview.
@@ -450,32 +450,122 @@ it('shows a soft look-at-screen reminder that is not counted and logs one minor 
   expect(events.some((e) => e.type === 'face_absent')).toBe(false);
 });
 
+const NOISE_BANNER = 'Background noise detected. Please continue the interview in a quiet environment.';
+
 it('warns when music keeps playing in the background while the candidate is silent', async () => {
-  monitor.snapshot.mockReturnValue({ ...quiet, speaking: false, noiseFloor: 0.004 });
+  monitor.snapshot.mockReturnValue({ ...quiet, speaking: true, noiseFloor: 0.004, band: 0.004 });
   await startAndListen();
-  for (let t = 0; t <= 5000; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
+  // 2 s to judge the window, then 2 s of confirmation.
+  for (let t = 0; t <= 3800; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
   expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  for (let t = 5100; t <= 7000; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
+  for (let t = 3900; t <= 4500; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
   expect(await screen.findByRole('alertdialog', { name: 'Background sound was heard' })).toBeInTheDocument();
   await waitFor(() => expect(api.reportProctoringEvents).toHaveBeenCalledWith('session-1', [
     expect.objectContaining({ type: 'background_sound' }),
   ]));
 });
 
-it('does not flag a quiet room or the candidate speaking', async () => {
-  monitor.snapshot.mockReturnValue({ ...quiet, speaking: true, noiseFloor: 0.004 });
+it('keeps the background-noise warning while someone talks nearby, and clears it once the room is quiet', async () => {
+  let level = 0.0002;
+  monitor.snapshot.mockImplementation(() => ({ ...quiet, speaking: level > 0.001, noiseFloor: 0.0002, band: level }));
   await startAndListen();
-  for (let t = 0; t <= 10000; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
+  // Someone talking off camera: 300 ms of speech, 200 ms of pause; the candidate's lips are still.
+  const talkNearby = (from, to) => {
+    for (let t = from, k = 0; t <= to; t += 100, k += 1) {
+      level = k % 5 < 3 ? 0.004 : 0.0002;
+      act(() => behavior.props.onFrame(face, 40000 + t));
+    }
+  };
+  talkNearby(0, 5000);
+  expect(await screen.findByRole('alertdialog', { name: 'Background sound was heard' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Continue the interview' }));
+  // Closing the warning does not hide it while the talking goes on.
+  talkNearby(5100, 12000);
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  expect(screen.getByText(NOISE_BANNER)).toBeInTheDocument();
+  expect(screen.getByText('1 of 3')).toBeInTheDocument(); // one incident, one warning
+  level = 0.0002;
+  for (let t = 12100; t <= 20000; t += 100) act(() => behavior.props.onFrame(face, 40000 + t));
+  await waitFor(() => expect(screen.queryByText(NOISE_BANNER)).not.toBeInTheDocument());
+});
+
+it('does not flag a quiet room or the candidate speaking', async () => {
+  let level = 0.0002;
+  monitor.snapshot.mockImplementation(() => ({ ...quiet, speaking: level > 0.001, noiseFloor: 0.0002, band: level }));
+  await startAndListen();
+  // The candidate answering: loud while talking (lips moving), quiet in the pauses.
+  for (let t = 0, k = 0; t <= 10000; t += 100, k += 1) {
+    level = k % 10 < 7 ? 0.004 : 0.0002;
+    act(() => behavior.props.onFrame({ ...face, mouth: k % 2 ? 0.2 : 0.1 }, 30000 + t));
+  }
   expect(screen.queryByRole('alertdialog', { name: 'Background sound was heard' })).not.toBeInTheDocument();
-  monitor.snapshot.mockReturnValue({ ...quiet, speaking: false, noiseFloor: 0.0002 });
+  // A quiet room with fan or microphone noise.
+  level = 0.0002;
   for (let t = 10100; t <= 20000; t += 100) act(() => behavior.props.onFrame(face, 30000 + t));
   expect(screen.queryByRole('alertdialog', { name: 'Background sound was heard' })).not.toBeInTheDocument();
+  expect(screen.queryByText(NOISE_BANNER)).not.toBeInTheDocument();
 });
 
 it('warns when a phone is detected by the scene monitor', async () => {
   await startAndListen();
   act(() => scene.onEvent({ type: 'phone_detected', phase: 'start' }));
   expect(await screen.findByRole('alertdialog', { name: 'A phone is in view' })).toBeInTheDocument();
+});
+
+const PHONE_BANNER = 'Phone detected. Please remove the phone from the camera.';
+const PEOPLE_BANNER = 'Multiple people detected. Only the candidate should be visible.';
+
+it('keeps the phone warning on screen until the phone is gone, even after Continue', async () => {
+  await startAndListen();
+  act(() => scene.onEvent({ type: 'phone_detected', phase: 'start' }));
+  await screen.findByRole('alertdialog', { name: 'A phone is in view' });
+  fireEvent.click(screen.getByRole('button', { name: 'Continue the interview' }));
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  expect(screen.getByText(PHONE_BANNER)).toBeInTheDocument();
+  act(() => scene.onEvent({ type: 'phone_detected', phase: 'end' })); // the scene monitor confirms it is gone
+  expect(screen.queryByText(PHONE_BANNER)).not.toBeInTheDocument();
+  expect(screen.getByText('1 of 3')).toBeInTheDocument();
+});
+
+it('clears each warning on its own when several happen at once', async () => {
+  // A higher limit, so three warnings do not end the interview here.
+  api.startInterview.mockResolvedValue({ interview_id: 'session-1', question: first, current_turn: 1, max_turns: 2, proctoring: { max_violations: 5 } });
+  let level = 0.004;
+  monitor.snapshot.mockImplementation(() => ({ ...quiet, band: level }));
+  await startAndListen();
+  act(() => scene.onEvent({ type: 'phone_detected', phase: 'start' }));
+  for (let t = 0; t <= 4500; t += 100) act(() => behavior.props.onFrame({ ...face, faceCount: 2 }, 50000 + t)); // + a person + music
+  for (const text of [PHONE_BANNER, PEOPLE_BANNER, NOISE_BANNER]) expect(screen.getByText(text)).toBeInTheDocument();
+
+  act(() => scene.onEvent({ type: 'phone_detected', phase: 'end' }));
+  expect(screen.queryByText(PHONE_BANNER)).not.toBeInTheDocument();
+  expect(screen.getByText(PEOPLE_BANNER)).toBeInTheDocument();
+  expect(screen.getByText(NOISE_BANNER)).toBeInTheDocument();
+
+  for (let t = 4600; t <= 8000; t += 100) act(() => behavior.props.onFrame(face, 50000 + t)); // the person leaves
+  expect(screen.queryByText(PEOPLE_BANNER)).not.toBeInTheDocument();
+  expect(screen.getByText(NOISE_BANNER)).toBeInTheDocument();
+
+  level = 0.0002; // the room goes quiet
+  for (let t = 8100; t <= 16000; t += 100) act(() => behavior.props.onFrame(face, 50000 + t));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('never tells the candidate how many questions there are', async () => {
+  renderInterview();
+  await screen.findByRole('button', { name: 'Start Interview' });
+  expect(screen.queryByText(/\d+ questions/)).not.toBeInTheDocument();
+  await clickStart();
+  await screen.findByText('Listening');
+  expect(screen.getByRole('heading', { name: 'Question 1' })).toBeInTheDocument();
+  expect(screen.queryByText(/of 2\b/)).not.toBeInTheDocument();
+  const progress = screen.getByRole('progressbar', { name: 'Interview progress' });
+  expect(progress).not.toHaveAttribute('aria-valuemax');
+  expect(progress.children).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  await screen.findByText(next.question);
+  expect(screen.getByRole('heading', { name: 'Question 2' })).toBeInTheDocument();
+  expect(progress.children).toHaveLength(2);
 });
 
 it('flags speech while the lips are still, and sends the answer signals', async () => {

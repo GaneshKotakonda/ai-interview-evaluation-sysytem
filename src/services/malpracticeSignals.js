@@ -146,6 +146,72 @@ export function createLipSyncTracker({ windowMs = 800, stillRange = 0.03, minStr
 // floor, so it never "hears" music by itself; this absolute check does.
 export const BACKGROUND_SOUND_FLOOR = 0.001;
 
+// Background noise during an answer, judged over a rolling window of the
+// speech-band level (the same scale as BACKGROUND_SOUND_FLOOR). Two kinds:
+//   steady  the quietest moments of the window are still loud: music, a TV,
+//           a loud machine. Holds even while the candidate talks, because
+//           speech always has pauses.
+//   voices  audible sound for at least half the moments the candidate's lips
+//           are visible and still: someone talking nearby, a TV, noises the
+//           candidate is not making. Not judged while typing (coding), since
+//           key clicks would count.
+// It switches on at the `on` shares and off only below the lower `off` shares
+// (hysteresis), so it does not flicker at the edge. The guard adds its own
+// start/clear confirmation on top (createEpisode).
+export const BACKGROUND_NOISE = {
+  windowMs: 4000,          // judged over the last 4 seconds
+  minWindowMs: 2000,       // ...and only once 2 seconds have been heard
+  soundLevel: 0.001,       // a moment counts as audible sound above this
+  steadyPercentile: 0.1,   // the quietest 10% of the window...
+  steadyLevel: BACKGROUND_SOUND_FLOOR, // ...above this = steady sound
+  voicedOn: 0.5,           // audible in at least half the still-lip moments
+  voicedOff: 0.25,         // clears below a quarter
+  minStillShare: 0.4,      // lips visible and still in 40% of the window to judge voices
+  lipWindowMs: 800,        // lips are "still" when their gap barely changed over this
+  lipStillRange: 0.03,     // (same as the lip-sync check)
+  startAfterMs: 2000,      // confirmation before the warning (createEpisode)
+  endAfterMs: 3000,        // quiet time before it clears
+};
+
+// update(t, { level, facePresent, mouth, typing }) -> { noisy, steady, voices }
+export function createBackgroundNoiseTracker(options = {}) {
+  const o = { ...BACKGROUND_NOISE, ...options };
+  const samples = [];   // { t, level, still }
+  const lips = [];      // { t, mouth }
+  let noisy = false;
+
+  return {
+    update(t, { level, facePresent = false, mouth = null, typing = false } = {}) {
+      if (Number.isFinite(mouth) && facePresent) lips.push({ t, mouth });
+      while (lips.length && t - lips[0].t > o.lipWindowMs) lips.shift();
+      const gaps = lips.map((s) => s.mouth);
+      const still = facePresent && gaps.length >= 2 && Math.max(...gaps) - Math.min(...gaps) < o.lipStillRange;
+      if (Number.isFinite(level)) samples.push({ t, level, still });
+      while (samples.length && t - samples[0].t > o.windowMs) samples.shift();
+
+      if (!samples.length || t - samples[0].t < o.minWindowMs) {
+        noisy = false;
+        return { noisy, steady: false, voices: false };
+      }
+      const levels = samples.map((s) => s.level).sort((a, b) => a - b);
+      const steady = levels[Math.floor(levels.length * o.steadyPercentile)] > o.steadyLevel;
+      const stillSamples = samples.filter((s) => s.still);
+      let voices = false;
+      if (!typing && stillSamples.length >= samples.length * o.minStillShare) {
+        const share = stillSamples.filter((s) => s.level > o.soundLevel).length / stillSamples.length;
+        voices = share >= (noisy ? o.voicedOff : o.voicedOn);
+      }
+      noisy = steady || voices;
+      return { noisy, steady, voices };
+    },
+    reset() {
+      samples.length = 0;
+      lips.length = 0;
+      noisy = false;
+    },
+  };
+}
+
 export const LOOK_AWAY_WARNING_MS = 3000;
 export const FACE_MISSING_WARNING_MS = 3000;
 export const GAZE_WARNING_COOLDOWN_MS = 6000;

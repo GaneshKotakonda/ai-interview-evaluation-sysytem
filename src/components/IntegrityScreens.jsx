@@ -11,7 +11,9 @@ import { captureFrame } from '../services/cameraSnapshot';
 // -------------------------------------------------------------
 // Screens shared by the interview and the ranked Arena:
 //   VoiceBars          speaking / microphone level animation
-//   IntegrityOverlays  "you left" (with the away countdown) and warnings
+//   IntegrityOverlays  "you left" (with the away countdown) and warnings,
+//                      plus the persistent banner while a condition lasts
+//   ActiveWarnings     that banner: one line per condition still detected
 //   RulesStep          the rules, read aloud before anything else
 //   IdentityEnrolment  photo + one sentence read aloud
 // -------------------------------------------------------------
@@ -47,7 +49,29 @@ function Dialog({ id, title, children, action }) {
   );
 }
 
+// Conditions that are still being detected (a phone, another person,
+// background noise). There is no close button: each line goes away only
+// when its detector confirms the condition has stopped.
+export function ActiveWarnings({ warnings }) {
+  if (!warnings?.length) return null;
+  return (
+    <div role="alert" aria-live="assertive" className="pointer-events-none fixed inset-x-0 top-4 z-50 mx-auto flex w-full max-w-xl flex-col gap-2 px-4">
+      {warnings.map(({ type, message }) => (
+        <div key={type} data-warning={type} className="fade-in flex items-start gap-3 rounded-xl border border-bad/40 bg-surface px-4 py-3 text-sm font-medium text-ink shadow-pop">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-bad" aria-hidden="true" />
+          <span>{message}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function IntegrityOverlays({ guard, sessionLabel = 'interview' }) {
+  const banner = guard.persistentWarnings ? <ActiveWarnings warnings={guard.activeWarnings} /> : null;
+  return <>{banner}<IntegrityDialogs guard={guard} sessionLabel={sessionLabel} /></>;
+}
+
+function IntegrityDialogs({ guard, sessionLabel }) {
   const { away, warning, violations, maxViolations, awayLeft, maxAwaySeconds } = guard;
   if (away) {
     return (

@@ -12,7 +12,8 @@
 // recorded or sent anywhere by this module.
 //
 // const monitor = createVoiceMonitor(stream);
-// monitor.snapshot() -> { level 0..1, speaking, speechMs, silenceMs, elapsedMs, noiseFloor }
+// monitor.snapshot() -> { level 0..1, speaking, speechMs, silenceMs, elapsedMs, noiseFloor, band }
+//   band: the latest speech-band level (the background-noise check uses it)
 // monitor.reset()    -> start a new answer (keeps the learned noise level)
 // monitor.stop()
 
@@ -44,6 +45,7 @@ export function createSpeechDetector({
   let lastVoiceAt = null;
   let startedAt = 0;
   let now = 0;
+  let band = 0;
 
   const updateFloor = () => {
     const sorted = [...history].sort((a, b) => a - b);
@@ -53,6 +55,7 @@ export function createSpeechDetector({
   return {
     push(level, time) {
       now = time;
+      band = level;
       history.push(level);
       if (history.length > maxHistory) history.shift();
       if (history.length % 4 === 0 || history.length < 20) updateFloor();
@@ -74,6 +77,7 @@ export function createSpeechDetector({
         silenceMs: lastVoiceAt === null ? time - startedAt : time - lastVoiceAt,
         elapsedMs: time - startedAt,
         noiseFloor: floor,
+        band,
       };
     },
     reset(time = now) {

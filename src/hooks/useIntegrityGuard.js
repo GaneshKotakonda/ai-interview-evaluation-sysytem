@@ -11,7 +11,11 @@
 //     while the lips are still) and the scene monitor (phone, book, covered
 //     or frozen camera);
 //   * identity snapshots every 20 s once the candidate is enrolled;
-//   * sending every event to the server, in order, retrying failures.
+//   * sending every event to the server, in order, retrying failures;
+//   * with `persistentWarnings`, the conditions that are still going on
+//     (a phone in view, more than one person, background noise). Each is
+//     set and cleared only by its own detector, never by the candidate
+//     closing the warning, so the page can keep showing it until it stops.
 //
 // Every function reads refs, so callbacks created early never go stale.
 // The page decides what "ending" means through onTerminate(reason), with
@@ -21,7 +25,9 @@ import { api } from '../services/api';
 import { enterFullscreen, exitFullscreen, startProctoring } from '../services/proctoring';
 import { startSceneMonitor } from '../services/sceneMonitor';
 import { captureFrame } from '../services/cameraSnapshot';
-import { BACKGROUND_SOUND_FLOOR, createAttentionTracker, createEpisode, GAZE_WARNING_DISPLAY_MS } from '../services/malpracticeSignals';
+import {
+  BACKGROUND_NOISE, BACKGROUND_SOUND_FLOOR, createAttentionTracker, createBackgroundNoiseTracker, createEpisode, GAZE_WARNING_DISPLAY_MS,
+} from '../services/malpracticeSignals';
 
 export const SNAPSHOT_EVERY_MS = 20000;
 const AWAY_TICK_MS = 250;
@@ -39,9 +45,18 @@ export const WARNINGS = {
   voice_mismatch: ['The answer was not in your voice', 'The voice in your last answer does not match yours. Only you may answer.'],
 };
 
+// Shown for as long as the condition lasts (persistentWarnings), in this order.
+export const PERSISTENT_WARNINGS = {
+  phone_detected: 'Phone detected. Please remove the phone from the camera.',
+  extra_person: 'Multiple people detected. Only the candidate should be visible.',
+  background_sound: 'Background noise detected. Please continue the interview in a quiet environment.',
+};
+
 const newEventId = (type) => `${type}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
-export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTerminate, gazeWarnings = false }) {
+export function useIntegrityGuard({
+  videoRef, monitorRef, turnRef, context, onTerminate, gazeWarnings = false, persistentWarnings = false,
+}) {
   const [violations, setViolations] = useState(0);
   const [maxViolations, setMaxViolations] = useState(3);
   const [maxAwaySeconds, setMaxAwaySeconds] = useState(5);
@@ -52,17 +67,24 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
   const [attention, setAttention] = useState(null);
   const [terminated, setTerminated] = useState(null);
   const [enrolled, setEnrolled] = useState(false);
+  // Conditions still going on (persistentWarnings only): { phone_detected: true, ... }
+  const [conditions, setConditions] = useState({});
 
   const r = useRef({
     interviewId: null, violations: 0, max: 3, maxAway: 5, queue: [], flushing: null, answerIndex: undefined, proctor: null, scene: null,
     watching: false, terminated: false, warning: null, identity: { enabled: false, enrolled: false },
     attention: createAttentionTracker(), attentionTimer: null, gazeWarnings,
+    persistent: persistentWarnings, conditions: {}, noise: createBackgroundNoiseTracker(),
     snapshotTimer: null, snapshotBusy: false, awayTimer: null, outsideSince: null, warned: {}, openEpisodes: {},
     episodes: {
       extra_person: createEpisode({ startAfterMs: 1500, endAfterMs: 3000 }),
       face_absent: createEpisode({ startAfterMs: 10000, endAfterMs: 1500 }),
       // Steady sound while the candidate is not speaking: music, TV, other people.
-      background_sound: createEpisode({ startAfterMs: 6000, endAfterMs: 3000 }),
+      // With persistentWarnings the windowed noise tracker feeds it instead,
+      // which already smooths over several seconds.
+      background_sound: persistentWarnings
+        ? createEpisode({ startAfterMs: BACKGROUND_NOISE.startAfterMs, endAfterMs: BACKGROUND_NOISE.endAfterMs })
+        : createEpisode({ startAfterMs: 6000, endAfterMs: 3000 }),
     },
   });
   const latest = useRef({ context, onTerminate });
@@ -159,6 +181,12 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
     g.flagOnce = (type, details) => {
       if (s.warned[type]) return;
       s.warned[type] = true;
+      // One incident, one warning: a voice already counted as background
+      // noise is recorded but not counted again.
+      if (s.persistent && type === 'other_voice' && s.conditions.background_sound) {
+        g.queueEvent({ id: newEventId(type), type, ...g.context(), details });
+        return;
+      }
       g.registerViolation(type, details);
     };
     g.newAnswer = () => {
@@ -178,15 +206,36 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
       g.syncViolations(result.violations);
     };
 
+    // The source of truth for a persistent warning is the detector: set when
+    // its episode starts, cleared when it ends, independent of each other.
+    g.setCondition = (type, on) => {
+      if (!s.persistent || !(type in PERSISTENT_WARNINGS) || Boolean(s.conditions[type]) === on) return;
+      s.conditions = { ...s.conditions };
+      if (on) s.conditions[type] = true;
+      else delete s.conditions[type];
+      setConditions(s.conditions);
+    };
+    g.clearConditions = () => {
+      if (!Object.keys(s.conditions).length) return;
+      s.conditions = {};
+      setConditions(s.conditions);
+    };
+
     g.handleEpisode = (type, phase, details = {}) => {
       if (!phase) return;
       if (phase === 'start') {
+        if (s.watching && !s.terminated) g.setCondition(type, true);
         const id = newEventId(type);
         s.openEpisodes[type] = { id, context: g.context(), startedAt: performance.now() };
-        if (type === 'book_detected') g.queueEvent({ id, type, ...g.context(), details });
+        // A book is only recorded. Background noise heard after the same
+        // answer's "another voice" warning is the same incident: recorded,
+        // shown, not counted twice.
+        const sameIncident = s.persistent && type === 'background_sound' && s.warned.other_voice;
+        if (type === 'book_detected' || sameIncident) g.queueEvent({ id, type, ...g.context(), details });
         else g.registerViolation(type, details, id);
         return;
       }
+      g.setCondition(type, false);
       const open = s.openEpisodes[type];
       if (!open) return;
       delete s.openEpisodes[type];
@@ -212,7 +261,7 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
 
     // One analysed camera frame. `signals` (per-answer collector) and
     // `listening` (an answer is being given) enable the lip-movement check.
-    g.handleFrame = (observation, time, { signals = null, listening = false } = {}) => {
+    g.handleFrame = (observation, time, { signals = null, listening = false, coding = false } = {}) => {
       if (!s.watching || s.terminated) return;
       const scene = s.scene?.latest?.();
       const extra = observation.faceCount > 1 || (scene?.persons ?? 0) >= 2;
@@ -223,8 +272,22 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
       // while they are silent. Their own speech and the spoken question are
       // excluded (only checked while an answer is being given).
       const sound = listening ? monitorRef?.current?.snapshot?.() : null;
-      const loudRoom = Boolean(sound && !sound.speaking && sound.noiseFloor > BACKGROUND_SOUND_FLOOR);
-      g.handleEpisode('background_sound', s.episodes.background_sound.update(time, loudRoom));
+      if (s.persistent) {
+        // Judged only while an answer is being given (the spoken question
+        // would count). Between answers the warning keeps its state, and the
+        // next answer starts a fresh window.
+        if (sound) {
+          const noise = s.noise.update(time, {
+            level: sound.band, facePresent: observation.facePresent, mouth: observation.mouth, typing: coding,
+          });
+          g.handleEpisode('background_sound', s.episodes.background_sound.update(time, noise.noisy));
+        } else {
+          s.noise.reset();
+        }
+      } else {
+        const loudRoom = Boolean(sound && !sound.speaking && sound.noiseFloor > BACKGROUND_SOUND_FLOOR);
+        g.handleEpisode('background_sound', s.episodes.background_sound.update(time, loudRoom));
+      }
       if (s.gazeWarnings) {
         const a = s.attention.update(time, observation);
         if (a.warn) g.showAttention(a.warn);
@@ -328,6 +391,8 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
       stopAwayTimer();
       s.attention.reset();
       g.clearAttention();
+      s.noise.reset();
+      g.clearConditions();
     };
 
     g.returnToInterview = async () => {
@@ -360,5 +425,8 @@ export function useIntegrityGuard({ videoRef, monitorRef, turnRef, context, onTe
   // Stable between state changes, so callbacks depending on it rarely change.
   return useMemo(() => ({
     ...guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled,
-  }), [guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled]);
+    persistentWarnings, conditions,
+    // Active persistent warnings, in a fixed order: [{ type, message }]
+    activeWarnings: Object.keys(PERSISTENT_WARNINGS).filter((type) => conditions[type]).map((type) => ({ type, message: PERSISTENT_WARNINGS[type] })),
+  }), [guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled, persistentWarnings, conditions]);
 }

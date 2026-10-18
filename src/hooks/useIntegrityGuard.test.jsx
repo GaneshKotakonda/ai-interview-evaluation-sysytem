@@ -23,9 +23,10 @@ function deferred() {
 
 function setup(options = {}) {
   const turnRef = { current: 1 };
+  const videoRef = { current: {} }; // stable, like the page's useRef
   let position = 12;
   const result = renderHook(() => useIntegrityGuard({
-    videoRef: { current: {} }, turnRef,
+    videoRef, turnRef,
     context: () => ({ part: 2, at: position }), ...options,
   })).result;
   act(() => result.current.configure({ interviewId: 'iv', maxViolations: 5, identity: { enabled: true, enrolled: true } }));
@@ -135,3 +136,63 @@ it('completes termination triggered by an acknowledged batch without awaiting it
   expect(onTerminate).toHaveBeenCalledWith('violations');
   expect(exitFullscreen).toHaveBeenCalledTimes(1);
 });
+
+it('keeps each persistent warning until its own detector clears it, whatever the candidate clicks', async () => {
+  const { result } = setup({ persistentWarnings: true });
+  await act(async () => { await result.current.start(); });
+  act(() => result.current.handleEpisode('phone_detected', 'start'));
+  act(() => result.current.handleEpisode('extra_person', 'start'));
+  expect(result.current.activeWarnings.map((w) => w.type)).toEqual(['phone_detected', 'extra_person']);
+  expect(result.current.violations).toBe(2); // counted once each, as before
+
+  act(() => result.current.dismissWarning()); // the candidate presses "Continue"
+  expect(result.current.warning).toBeNull();
+  expect(result.current.activeWarnings.map((w) => w.type)).toEqual(['phone_detected', 'extra_person']);
+
+  act(() => result.current.handleEpisode('phone_detected', 'end')); // the phone is gone
+  expect(result.current.activeWarnings).toEqual([
+    { type: 'extra_person', message: 'Multiple people detected. Only the candidate should be visible.' },
+  ]);
+  act(() => result.current.handleEpisode('extra_person', 'end'));
+  expect(result.current.activeWarnings).toEqual([]);
+  expect(result.current.violations).toBe(2);
+});
+
+it('clears persistent warnings when the session stops, and never tracks them by default', async () => {
+  const { result } = setup({ persistentWarnings: true });
+  await act(async () => { await result.current.start(); });
+  act(() => result.current.handleEpisode('phone_detected', 'start'));
+  act(() => result.current.stop());
+  expect(result.current.activeWarnings).toEqual([]);
+
+  const plain = setup().result; // the Arena does not opt in
+  await act(async () => { await plain.current.start(); });
+  act(() => plain.current.handleEpisode('phone_detected', 'start'));
+  expect(plain.current.persistentWarnings).toBe(false);
+  expect(plain.current.activeWarnings).toEqual([]);
+  expect(plain.current.warning).toMatchObject({ type: 'phone_detected' });
+});
+
+it('counts one background voice once, as "another voice" or as background noise', async () => {
+  const { result } = setup({ persistentWarnings: true });
+  await act(async () => { await result.current.start(); });
+  act(() => result.current.beginAnswer(1));
+  act(() => result.current.flagOnce('other_voice', { source: 'lip_sync' }));
+  act(() => result.current.handleEpisode('background_sound', 'start'));
+  expect(result.current.violations).toBe(1);
+  expect(result.current.activeWarnings.map((w) => w.type)).toEqual(['background_sound']);
+
+  act(() => result.current.beginAnswer(2));
+  act(() => result.current.handleEpisode('background_sound', 'end'));
+  act(() => result.current.handleEpisode('background_sound', 'start'));
+  act(() => result.current.flagOnce('other_voice', { source: 'lip_sync' }));
+  expect(result.current.violations).toBe(2);
+  await waitForQueue();
+  const types = api.reportProctoringEvents.mock.calls.flatMap(([, batch]) => batch.map((e) => e.type));
+  expect(types.filter((t) => t === 'other_voice')).toHaveLength(2);      // both recorded
+  expect(types.filter((t) => t === 'background_sound')).toHaveLength(3); // two starts and one end
+});
+
+async function waitForQueue() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}

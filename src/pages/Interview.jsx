@@ -113,6 +113,9 @@ export default function Interview() {
     monitorRef,
     turnRef,
     gazeWarnings: true,
+    // A phone, another person or background noise stays on screen until the
+    // detector confirms it has stopped, not until the candidate closes it.
+    persistentWarnings: true,
     context: () => ({
       part: sessionRef.current?.part ?? null,
       at: sessionRef.current ? sessionRef.current.elapsedSeconds() : null,
@@ -588,7 +591,7 @@ export default function Interview() {
         <Panel className="overflow-hidden">
           <div className="grid sm:grid-cols-[minmax(0,1fr)_240px]">
             <div className="p-7 sm:p-9">
-              <p className="text-[13px] text-ink-3">{targetRole} · {maxTurns} questions</p>
+              <p className="text-[13px] text-ink-3">{targetRole} · Adaptive interview</p>
               <h1 className="mt-2 font-serif text-[2.4rem] leading-[1.05] tracking-[-0.02em] text-ink">
                 {resumed ? 'Welcome back' : 'Ready when you are'}
               </h1>
@@ -676,7 +679,7 @@ export default function Interview() {
           ['Camera', cameraReady ? 'Active' : 'Unavailable', cameraReady],
           ['Microphone', microphoneReady ? 'Active' : 'Unavailable', microphoneReady],
           ['Answer mode', voiceMode ? 'Spoken' : 'Typed', true],
-          ['Answered', `${responses.filter((item) => item.completed).length} of ${maxTurns}`, true],
+          ['Answered', `${responses.filter((item) => item.completed).length}`, true],
           ['Identity', guard.enrolled ? 'Verified at start' : 'Not checked', guard.enrolled],
           ['Integrity warnings', `${guard.violations} of ${guard.maxViolations}`, guard.violations === 0],
         ].map(([label, value, ok]) => (
@@ -704,7 +707,7 @@ export default function Interview() {
               {targetJd && <Badge tone="ink">Tailored to JD</Badge>}
             </div>
             <h1 className="mt-1 font-serif text-[2.1rem] tracking-[-0.02em] leading-none text-ink">
-              Question {currentTurn} of {maxTurns}
+              Question {currentTurn}
             </h1>
           </div>
           <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -716,12 +719,14 @@ export default function Interview() {
             </span>
           </div>
         </div>
-        <div role="progressbar" aria-label="Interview progress" aria-valuemin={0} aria-valuemax={maxTurns} aria-valuenow={currentTurn} className="flex gap-1.5">
-          {Array.from({ length: maxTurns }, (_, index) => {
+        {/* One mark per question so far: the candidate is not told how many
+            questions there will be (the interview adapts as it goes). */}
+        <div role="progressbar" aria-label="Interview progress" aria-valuetext={`Question ${currentTurn}`} className="flex gap-1.5">
+          {Array.from({ length: currentTurn }, (_, index) => {
             const turn = index + 1;
             const done = turn < currentTurn || (turn === currentTurn && stage === 'finishing');
             return (
-              <span key={turn} className="relative h-1 flex-1 overflow-hidden rounded-full bg-line">
+              <span key={turn} className="relative h-1 w-10 overflow-hidden rounded-full bg-line">
                 {(done || turn === currentTurn) && <span className={`grow-x absolute inset-0 rounded-full ${done ? 'bg-ink' : 'bg-ink/35'}`} />}
               </span>
             );
@@ -882,6 +887,7 @@ export default function Interview() {
             onFrame={(observation, time) => guard.handleFrame(observation, time, {
               signals: answerSignalsRef.current,
               listening: stageRef.current === 'listening' || stageRef.current === 'coding',
+              coding: stageRef.current === 'coding',
             })}
             onMetricsChange={(sessionMetrics, answerMetrics) => {
               visionMetricsRef.current = sessionMetrics;
