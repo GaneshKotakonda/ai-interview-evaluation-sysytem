@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight, Camera, Code2, Gamepad2, Lightbulb, ShieldCheck, Trophy,
+  ArrowRight, Camera, Code2, Gamepad2, Lightbulb, Mic, RotateCcw, ShieldCheck, SkipForward, Trophy,
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import BehaviorMonitor from '../components/BehaviorMonitor';
 import CodingWorkspace from '../components/CodingWorkspace';
 import {
-  IdentityEnrolment, IntegrityOverlays, RulesStep, TerminatedScreen,
+  IdentityEnrolment, IntegrityOverlays, RulesStep, TerminatedScreen, VoiceBars,
 } from '../components/IntegrityScreens';
 import {
   CountUp, EmptyState, Notice, Panel, Spinner,
@@ -16,7 +16,11 @@ import { api } from '../services/api';
 import { exitFullscreen, hasMultipleDisplays } from '../services/proctoring';
 import { createVoiceMonitor } from '../services/voiceActivity';
 import { createAnswerSignals, isVirtualDevice } from '../services/malpracticeSignals';
-import { stopSpeaking } from '../services/speech';
+import { playTurnChime, speak, stopSpeaking } from '../services/speech';
+import { startAnswerRecording } from '../services/answerRecorder';
+import {
+  COUNTDOWN_FROM_MS, MAX_ANSWER_MS, MIN_SPEECH_MS, NO_VOICE_HINT_MS, SILENCE_TO_ADVANCE_MS, TICK_MS,
+} from '../services/answerPacing';
 import { useIntegrityGuard } from '../hooks/useIntegrityGuard';
 import { STORAGE_KEYS } from '../utils/interviewJourney';
 
@@ -27,10 +31,24 @@ import { STORAGE_KEYS } from '../utils/interviewJourney';
 // ranking category, coding challenges). Flow: Start (fullscreen) → rules →
 // identity check → per level: answer (or code in the VPL) → submit (graded
 // once, retry-safe) → advance (XP, streak, next level) → result card.
+//
+// Answers are spoken, as in the Standard Interview, with the same pieces
+// (speak, chime, answer recorder, server speech-to-text, pacing): the
+// interviewer reads the question → chime → listening → Done answering or
+// 3 seconds of silence → transcribe → the transcript goes to submit()
+// exactly where typed text used to, so grading, XP and the Boss Round are
+// unchanged. No speech heard: the candidate answers again (nothing is
+// submitted). Coding levels still use the VPL. Without a working
+// microphone recorder the level falls back to a typed answer.
 // Ranked play is proctored like an interview: warnings, the away limit and
 // malpractice detection. Ending early (staying away or too many warnings)
 // scores the remaining levels 0 and costs rating points.
 const difficultyLabel = (value) => (value ? value[0].toUpperCase() + value.slice(1) : '');
+const clock = (seconds) => {
+  const safe = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+};
+const NO_SPEECH = 'No speech detected. Please try answering again.';
 
 export default function ArenaPlay() {
   const { state } = useLocation();
@@ -52,6 +70,17 @@ export default function ArenaPlay() {
   const [cameraReady, setCameraReady] = useState(false);
   const [mediaError, setMediaError] = useState('');
   const [virtualDevice, setVirtualDevice] = useState(null);
+  // Voice answer: idle | speaking | listening | transcribing | transcribe-error | done
+  const [voice, setVoice] = useState('idle');
+  const [listen, setListen] = useState({ level: 0, countdown: null, seconds: 0, noVoice: false });
+  const [voiceNotice, setVoiceNotice] = useState('');
+  const [typedFallback, setTypedFallback] = useState(false);
+  const voiceRef = useRef('idle');
+  const recorderRef = useRef(null);
+  const pendingAudioRef = useRef(null);
+  const levelTokenRef = useRef(0);
+  const listenStartRef = useRef(0);
+  const finishRef = useRef(null);
   const startRef = useRef(null);
   const responseRef = useRef(null);
   const submittedPayloadRef = useRef(null);
@@ -76,6 +105,9 @@ export default function ArenaPlay() {
     context: () => ({ at: beganAtRef.current ? (Date.now() - beganAtRef.current) / 1000 : null }),
     onTerminate: async (reason) => {
       setPhase('terminated');
+      levelTokenRef.current += 1;
+      recorderRef.current?.cancel?.();
+      recorderRef.current = null;
       stopSpeaking();
       monitorRef.current?.stop();
       streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -159,6 +191,9 @@ export default function ArenaPlay() {
       cancelled = true;
       guard.stop();
       exitFullscreen();
+      levelTokenRef.current += 1;
+      recorderRef.current?.cancel?.();
+      recorderRef.current = null;
       stopSpeaking();
       monitorRef.current?.stop();
       streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -173,17 +208,60 @@ export default function ArenaPlay() {
     }
   });
 
-  const beginLevel = useCallback(() => {
-    signalsRef.current = createAnswerSignals({ voiceMode: false, now: performance.now() });
+  const beginLevel = useCallback((level) => {
+    signalsRef.current = createAnswerSignals({ voiceMode: level?.kind !== 'coding', now: performance.now() });
     guard.newAnswer();
     monitorRef.current?.reset();
   }, [guard]);
 
+  const setVoiceStage = useCallback((value) => {
+    voiceRef.current = value;
+    setVoice(value);
+  }, []);
+
+  // Start recording the spoken answer (after the question and the chime).
+  const listenNow = useCallback(() => {
+    if (!mountedRef.current || guard.isTerminated()) return;
+    recorderRef.current?.cancel?.();
+    recorderRef.current = streamRef.current ? startAnswerRecording(streamRef.current) : null;
+    if (!recorderRef.current) {
+      // No microphone recorder in this browser: answer by typing instead.
+      setTypedFallback(true);
+      setVoiceStage('idle');
+      return;
+    }
+    pendingAudioRef.current = null;
+    monitorRef.current?.reset();
+    listenStartRef.current = performance.now();
+    setListen({ level: 0, countdown: null, seconds: 0, noVoice: false });
+    setVoiceStage('listening');
+  }, [guard, setVoiceStage]);
+
+  // The interviewer reads the level's question once; a newer level (or
+  // leaving) cancels what is left of the previous one.
+  const askLevel = useCallback(async (level) => {
+    const token = ++levelTokenRef.current;
+    recorderRef.current?.cancel?.();
+    recorderRef.current = null;
+    pendingAudioRef.current = null;
+    setVoiceNotice('');
+    if (level.kind === 'coding') {
+      setVoiceStage('idle');
+      return;
+    }
+    setVoiceStage('speaking');
+    await speak({ interviewId: sessionIdRef.current, item: `question-${level.index}` }, `Question ${level.index}. ${level.question}`);
+    if (token !== levelTokenRef.current || !mountedRef.current || guard.isTerminated()) return;
+    playTurnChime();
+    listenNow();
+  }, [guard, listenNow, setVoiceStage]);
+
   const proceed = useCallback(() => {
     guard.startSnapshots();
-    beginLevel();
+    beginLevel(question);
     setPhase('answering');
-  }, [guard, beginLevel]);
+    askLevel(question);
+  }, [guard, beginLevel, askLevel, question]);
 
   async function begin() {
     beganAtRef.current = Date.now();
@@ -193,9 +271,11 @@ export default function ArenaPlay() {
   }
 
   // Submit the answer (if not yet accepted), then advance to get the result.
-  async function submit(codeAnswer = null) {
+  // `spokenText` is the transcript of a spoken answer; typed answers use `answer`.
+  async function submit(codeAnswer = null, spokenText = null) {
+    const text = spokenText ?? answer;
     if (busyRef.current || result || guard.isTerminated()) return;
-    if (!responseRef.current && !coding && !answer.trim()) return;
+    if (!responseRef.current && !coding && !text.trim()) return;
     busyRef.current = true;
     setError('');
     try {
@@ -211,8 +291,8 @@ export default function ArenaPlay() {
         } else {
           submittedPayloadRef.current ||= {
             questionIndex: question.index, questionText: question.question,
-            candidateAnswer: answer, videoBlob: null,
-            ...(signalsRef.current ? { answerSignals: signalsRef.current.summary(answer.length) } : {}),
+            candidateAnswer: text, videoBlob: null,
+            ...(signalsRef.current ? { answerSignals: signalsRef.current.summary(text.length) } : {}),
           };
         }
         const saved = coding
@@ -243,6 +323,75 @@ export default function ArenaPlay() {
     } finally {
       busyRef.current = false;
     }
+  }
+
+  // End the spoken answer: transcribe it, then submit the transcript. The
+  // recording is kept until it is transcribed, so a network retry never
+  // loses it. Nothing heard: ask again; an empty answer is never submitted.
+  async function finishSpeaking() {
+    if (!['listening', 'transcribe-error'].includes(voiceRef.current)) return;
+    if (busyRef.current || result || guard.isTerminated()) return;
+    const level = question;
+    const token = levelTokenRef.current;
+    setVoiceStage('transcribing');
+    setVoiceNotice('');
+    let blob = pendingAudioRef.current;
+    if (!blob) {
+      blob = await recorderRef.current?.stop();
+      recorderRef.current = null;
+      pendingAudioRef.current = blob || null;
+    }
+    const stale = () => token !== levelTokenRef.current || !mountedRef.current || guard.isTerminated();
+    try {
+      if (!blob) throw Object.assign(new Error('No recording'), { status: 422 });
+      const transcription = await api.transcribeAnswer(sessionIdRef.current, level.index, blob);
+      if (stale()) return;
+      guard.handleServerResult(transcription?.identity);
+      const text = (transcription?.transcript || '').trim();
+      if (!text) throw Object.assign(new Error('Empty transcript'), { status: 422 });
+      pendingAudioRef.current = null;
+      setAnswer(text);
+      setVoiceStage('done');
+      speak({ phrase: 'thanks' }, '');
+      await submit(null, text);
+    } catch (err) {
+      if (stale()) return;
+      if (err?.status === 422) {
+        pendingAudioRef.current = null;
+        setVoiceNotice(NO_SPEECH);
+        setVoiceStage('speaking');
+        await speak({ phrase: 'no_speech' }, "Sorry, I couldn't hear an answer. Please try answering again.");
+        if (stale()) return;
+        listenNow();
+        return;
+      }
+      setVoiceStage('transcribe-error');
+      setVoiceNotice('Your answer could not be processed. Check your connection and retry; your recording is kept.');
+    }
+  }
+  finishRef.current = finishSpeaking;
+
+  // Listening loop: level meter, silence, time limit (as in the Standard Interview).
+  useEffect(() => {
+    if (voice !== 'listening') return undefined;
+    const timer = setInterval(() => {
+      // While the candidate is away (or reading a warning) the answer cannot end by silence.
+      if (guard.isPaused()) return;
+      const snapshot = monitorRef.current?.snapshot();
+      if (snapshot?.speaking) signalsRef.current?.markActivity(performance.now());
+      const elapsedMs = snapshot?.elapsedMs ?? performance.now() - listenStartRef.current;
+      const spoke = (snapshot?.speechMs ?? 0) >= MIN_SPEECH_MS;
+      const quiet = spoke && !snapshot.speaking ? snapshot.silenceMs : 0;
+      const countdown = quiet >= COUNTDOWN_FROM_MS ? Math.max(0, Math.ceil((SILENCE_TO_ADVANCE_MS - quiet) / 1000)) : null;
+      setListen({ level: snapshot?.level ?? 0, countdown, seconds: elapsedMs / 1000, noVoice: !spoke && elapsedMs > NO_VOICE_HINT_MS });
+      if ((spoke && quiet >= SILENCE_TO_ADVANCE_MS) || elapsedMs >= MAX_ANSWER_MS) finishRef.current?.();
+    }, TICK_MS);
+    return () => clearInterval(timer);
+  }, [voice, guard]);
+
+  function repeatQuestion() {
+    if (voiceRef.current !== 'listening') return;
+    askLevel(question);
   }
 
   // Spend the single session hint on the current, unanswered level.
@@ -282,8 +431,10 @@ export default function ArenaPlay() {
     responseRef.current = null;
     submittedPayloadRef.current = null;
     setResult(null);
-    beginLevel();
+    setTypedFallback(false);
+    beginLevel(result.next_question);
     setPhase('answering');
+    askLevel(result.next_question);
   }
 
   if (!valid) return (
@@ -320,6 +471,7 @@ export default function ArenaPlay() {
           <h1 className="mt-2 font-serif text-[2.4rem] leading-[1.05] tracking-[-0.02em] text-ink">Ready to play?</h1>
           <ul className="mt-6 space-y-2.5 text-sm text-ink-2">
             <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />Six levels; the last one is the Boss Round. One hint per session.</li>
+            <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />The interviewer reads each question aloud; answer out loud after the chime.</li>
             <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />Your result changes your rating overall and in this category.</li>
             {session?.coding_round && <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />Levels 3 and 5 are coding challenges in the code editor.</li>}
             <li className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-bad" />
@@ -420,6 +572,12 @@ export default function ArenaPlay() {
                     <span className="text-ink-3">/ 100</span>
                   </p>
                   <p className="sr-only">Answer Score: {result.evaluation.answer_quality_score} / 100</p>
+                  {!coding && answer && (
+                    <>
+                      <h3 className="mt-6 text-[13px] text-ink-3">What we heard</h3>
+                      <p className="mt-1.5 leading-relaxed text-ink-2">&ldquo;{answer}&rdquo;</p>
+                    </>
+                  )}
                   <h3 className="mt-6 text-[13px] text-ink-3">Feedback</h3>
                   <p className="mt-1.5 leading-relaxed text-ink-2">{result.evaluation.feedback || 'No evaluator feedback was available.'}</p>
                   {result.evaluation.evaluation_source === 'fallback' && <p className="mt-3 text-[13px] text-warn">Approximate evaluation: the AI evaluator was unavailable for this answer.</p>}
@@ -468,19 +626,86 @@ export default function ArenaPlay() {
             <Panel key={`question-${question.index}`} className="p-6 sm:p-8">
               <p className="text-[13px] text-ink-3">{question.topic}</p>
               <h2 className="mt-2 font-serif text-[1.5rem] leading-snug text-ink">{question.question}</h2>
-              <label htmlFor="arena-answer" className="field-label mt-7">Your answer</label>
-              <textarea
-                id="arena-answer" rows={7} value={answer} disabled={locked}
-                onKeyDown={(event) => { signalsRef.current?.typing.keydown(event); signalsRef.current?.markActivity(); }}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (signalsRef.current?.typing.input(event.nativeEvent, value.length - answer.length)) {
-                    guard.flagOnce('text_injected', { chars: value.length - answer.length });
-                  }
-                  setAnswer(value);
-                }}
-                className="input-field !text-[15px] leading-relaxed" placeholder="Explain your approach and reasoning…"
-              />
+              {!typedFallback && (
+                <div className="mt-7 rounded-control border border-line bg-paper/60 px-5 py-4" aria-live="polite">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-4">
+                      {voice === 'speaking' && <VoiceBars />}
+                      {voice === 'listening' && <VoiceBars level={listen.level} />}
+                      {voice === 'listening' && <Mic aria-hidden="true" className="h-4 w-4 shrink-0 text-bad" />}
+                      {(voice === 'transcribing' || (voice === 'done' && busy)) && <Spinner className="h-5 w-5 text-ink-2" />}
+                      <div className="min-w-0">
+                        <p role="status" className="text-sm font-medium text-ink">
+                          {voice === 'speaking' && 'Interviewer is asking…'}
+                          {voice === 'listening' && 'Listening'}
+                          {voice === 'transcribing' && 'Processing your answer…'}
+                          {voice === 'transcribe-error' && 'Connection problem'}
+                          {voice === 'done' && (phase === 'submitting' ? 'Analyzing your answer…' : phase === 'advancing' ? 'Preparing your result…' : 'Answer received')}
+                        </p>
+                        <p className="text-xs text-ink-3">
+                          {voice === 'speaking' && 'Listen to the question. Your answer starts after the chime.'}
+                          {voice === 'listening' && listen.countdown === null && `${clock(listen.seconds)} · speak naturally; 3 seconds of silence submits your answer`}
+                          {voice === 'listening' && listen.countdown !== null && `Submitting in ${listen.countdown}… keep talking to continue`}
+                          {voice === 'transcribing' && 'Turning your spoken answer into text.'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {voice === 'speaking' && (
+                        <button className="ghost-btn !py-2 text-[13px]" onClick={() => stopSpeaking()}>
+                          <SkipForward aria-hidden="true" className="h-4 w-4" /> Skip to answer
+                        </button>
+                      )}
+                      {voice === 'listening' && (
+                        <button className="ghost-btn !py-2 text-[13px]" onClick={repeatQuestion} disabled={busy}>
+                          <RotateCcw aria-hidden="true" className="h-4 w-4" /> Repeat question
+                        </button>
+                      )}
+                      {voice === 'listening' && (
+                        <button className="primary-btn" onClick={() => finishSpeaking()} disabled={busy}>
+                          Done answering <ArrowRight aria-hidden="true" className="h-4 w-4" />
+                        </button>
+                      )}
+                      {voice === 'transcribe-error' && (
+                        <button className="primary-btn" onClick={() => finishSpeaking()}>Retry</button>
+                      )}
+                    </div>
+                  </div>
+                  {voice === 'listening' && listen.countdown !== null && (
+                    <div className="mt-4 h-1 overflow-hidden rounded-full bg-line" aria-hidden="true">
+                      <div className="h-full rounded-full bg-ink transition-[width] duration-200" style={{ width: `${(listen.countdown / 2) * 100}%` }} />
+                    </div>
+                  )}
+                  {voice === 'listening' && listen.noVoice && (
+                    <Notice tone="warn" className="mt-4">We can&apos;t hear you. Check that your microphone is on and unmuted.</Notice>
+                  )}
+                  {voiceNotice && <Notice tone="warn" role="alert" className="mt-4">{voiceNotice}</Notice>}
+                  {voice === 'done' && answer && (
+                    <div className="mt-4">
+                      <p className="text-xs text-ink-3">What we heard</p>
+                      <p className="mt-1 text-[15px] leading-relaxed text-ink-2">&ldquo;{answer}&rdquo;</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              {typedFallback && (
+                <>
+                  <Notice tone="warn" className="mt-7">Your microphone cannot record in this browser, so type this answer instead.</Notice>
+                  <label htmlFor="arena-answer" className="field-label mt-4">Your answer</label>
+                  <textarea
+                    id="arena-answer" rows={7} value={answer} disabled={locked}
+                    onKeyDown={(event) => { signalsRef.current?.typing.keydown(event); signalsRef.current?.markActivity(); }}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (signalsRef.current?.typing.input(event.nativeEvent, value.length - answer.length)) {
+                        guard.flagOnce('text_injected', { chars: value.length - answer.length });
+                      }
+                      setAnswer(value);
+                    }}
+                    className="input-field !text-[15px] leading-relaxed" placeholder="Explain your approach and reasoning…"
+                  />
+                </>
+              )}
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button className="secondary-btn !py-2" onClick={requestHint} disabled={locked || game.remaining_hints === 0}>
                   <Lightbulb aria-hidden="true" className="h-4 w-4" /> Use Hint
@@ -496,9 +721,12 @@ export default function ArenaPlay() {
                   {(phase === 'advancing' || phase === 'hint') && <Spinner className="h-3.5 w-3.5" />}
                   {phase === 'advancing' ? 'Preparing your result and next challenge…' : phase === 'hint' ? 'Preparing your hint…' : ''}
                 </p>
-                <button className="primary-btn" onClick={() => submit()} disabled={busy || (!responseRef.current && !answer.trim())}>
-                  {phase === 'submitting' ? 'Analyzing your answer…' : phase === 'advancing' ? 'Preparing your result…' : phase === 'advance-error' ? 'Retry Advancement' : phase === 'submit-error' ? 'Retry Submission' : 'Submit Answer'}
-                </button>
+                {/* Spoken answers submit themselves; this button types or retries. */}
+                {(typedFallback || phase === 'advance-error' || phase === 'submit-error') && (
+                  <button className="primary-btn" onClick={() => submit()} disabled={busy || (!responseRef.current && !answer.trim())}>
+                    {phase === 'submitting' ? 'Analyzing your answer…' : phase === 'advancing' ? 'Preparing your result…' : phase === 'advance-error' ? 'Retry Advancement' : phase === 'submit-error' ? 'Retry Submission' : 'Submit Answer'}
+                  </button>
+                )}
               </div>
             </Panel>
           )}
@@ -518,7 +746,9 @@ export default function ArenaPlay() {
             segmentKey={question.index}
             sampleIntervalMs={100}
             onFrame={(observation, time) => guard.handleFrame(observation, time, {
-              signals: signalsRef.current, listening: !result,
+              // Not while the interviewer is speaking: its voice is not the candidate's.
+              signals: signalsRef.current,
+              listening: !result && (coding || typedFallback || voiceRef.current === 'listening'),
             })}
           />
           <Panel className="p-5 text-[13px]">

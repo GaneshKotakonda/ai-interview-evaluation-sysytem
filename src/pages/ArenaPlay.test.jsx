@@ -5,17 +5,21 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ArenaPlay from './ArenaPlay';
 import { StrictMode } from 'react';
-const { api, navigate, proctor } = vi.hoisted(() => ({
+const { api, navigate, proctor, speech, recorder } = vi.hoisted(() => ({
   api: {
     startInterview: vi.fn(), submitAnswer: vi.fn(), nextQuestion: vi.fn(), useHint: vi.fn(),
-    submitCode: vi.fn(), endArena: vi.fn(), reportProctoringEvents: vi.fn(),
+    submitCode: vi.fn(), endArena: vi.fn(), reportProctoringEvents: vi.fn(), transcribeAnswer: vi.fn(),
   },
   navigate: vi.fn(),
   proctor: { callbacks: null, away: false },
+  speech: { speak: vi.fn(), stopSpeaking: vi.fn(), playTurnChime: vi.fn() },
+  recorder: { start: vi.fn() },
 }));
 vi.mock('../services/api', () => ({ api }));
-vi.mock('../services/speech', () => ({ speak: vi.fn().mockResolvedValue(), stopSpeaking: vi.fn() }));
-vi.mock('../services/voiceActivity', () => ({ createVoiceMonitor: () => ({ snapshot: () => ({ speaking: false }), reset: vi.fn(), stop: vi.fn() }) }));
+vi.mock('../services/speech', () => speech);
+vi.mock('../services/answerRecorder', () => ({ startAnswerRecording: (...args) => recorder.start(...args) }));
+const monitor = vi.hoisted(() => ({ snap: { speaking: false } }));
+vi.mock('../services/voiceActivity', () => ({ createVoiceMonitor: () => ({ snapshot: () => monitor.snap, reset: vi.fn(), stop: vi.fn() }) }));
 vi.mock('../services/sceneMonitor', () => ({ startSceneMonitor: () => ({ latest: () => ({ persons: 1 }), stop: vi.fn() }) }));
 vi.mock('../services/cameraSnapshot', () => ({ captureFrame: vi.fn().mockResolvedValue(null) }));
 vi.mock('../components/BehaviorMonitor', () => ({ default: () => <div>Behavior monitor</div> }));
@@ -42,6 +46,7 @@ const game = { base_xp: 88, difficulty_bonus: 10, streak_bonus: 0, hint_penalty:
 beforeEach(() => {
   vi.clearAllMocks(); sessionStorage.clear();
   proctor.away = false;
+  monitor.snap = { speaking: false };
   Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
     getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }], getVideoTracks: () => [{ label: 'Camera' }], getAudioTracks: () => [{}] }),
   } });
@@ -52,7 +57,11 @@ beforeEach(() => {
   api.startInterview.mockResolvedValue({ interview_id: 'arena-id', interview_mode: 'game', current_turn: 1, max_turns: 6, question });
   api.submitAnswer.mockResolvedValue({ response_id: 'answer-id', evaluation: { answer_quality_score: 88, feedback: 'Clear explanation' } });
   api.nextQuestion.mockResolvedValue({ evaluation: { answer_quality_score: 88, feedback: 'Clear explanation' }, game, next_question: second, current_turn: 2, max_turns: 6, is_complete: false });
+  api.transcribeAnswer.mockResolvedValue({ transcript: SPOKEN });
+  speech.speak.mockResolvedValue();
+  recorder.start.mockImplementation(() => ({ stop: vi.fn().mockResolvedValue(new Blob(['audio'], { type: 'audio/webm' })), cancel: vi.fn() }));
 });
+const SPOKEN = 'State tracks changing component data.';
 afterEach(cleanup);
 // Ready screen → Start (fullscreen) → rules → the first level.
 async function play() {
@@ -60,13 +69,16 @@ async function play() {
   fireEvent.click(await screen.findByRole('button', { name: /I understand/ }));
   await screen.findByText(question.question);
 }
+// The question is read, then the candidate answers out loud.
+async function speakAnswer() {
+  fireEvent.click(await screen.findByRole('button', { name: /Done answering/ }));
+}
 async function open() {
   render(<MemoryRouter initialEntries={[{ pathname: '/arena/play', state: { arenaConfig: config } }]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ArenaPlay /></MemoryRouter>);
   await play();
 }
-function submit() {
-  fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), { target: { value: 'State tracks changing component data.' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Submit Answer' }));
+async function submit() {
+  await speakAnswer();
 }
 it('starts a proctored, ranked six-level game with the camera on', async () => {
   await open();
@@ -99,14 +111,14 @@ it('coding levels open the VPL and submit code', async () => {
   const codingLevel = { index: 3, kind: 'coding', question: 'Coding problem', difficulty: 'medium', topic: 'Coding: arrays', coding: { title: 'Max Subarray' } };
   api.nextQuestion.mockResolvedValueOnce({ evaluation: { answer_quality_score: 88 }, game, next_question: codingLevel, current_turn: 3, max_turns: 6, is_complete: false });
   api.submitCode.mockResolvedValue({ response_id: 'code-id' });
-  await open(); submit();
+  await open(); await submit();
   fireEvent.click(await screen.findByRole('button', { name: 'Next Challenge' }));
   expect(await screen.findByText('VPL for Max Subarray')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Submit solution' }));
   await waitFor(() => expect(api.submitCode).toHaveBeenCalledWith('arena-id', expect.objectContaining({ questionIndex: 3, language: 'cpp' })));
 });
 it('holds the next question until the result is reviewed and uses returned XP', async () => {
-  await open(); submit();
+  await open(); await submit();
   await screen.findByRole('heading', { name: 'Answer Result' });
   expect(screen.getByText('98 XP')).toBeInTheDocument();
   expect(screen.getByText('Base Answer XP')).toBeInTheDocument();
@@ -116,16 +128,17 @@ it('holds the next question until the result is reviewed and uses returned XP', 
   expect(screen.getByText(second.question)).toBeInTheDocument();
   expect(screen.getByText('Level 2')).toBeInTheDocument();
   expect(screen.getByText('AI Follow-up')).toBeInTheDocument();
-  expect(screen.getByRole('textbox')).toHaveValue('');
+  // The next question is read aloud, then the candidate answers again.
+  await waitFor(() => expect(speech.speak).toHaveBeenCalledWith({ interviewId: 'arena-id', item: 'question-2' }, expect.stringContaining(second.question)));
   api.nextQuestion.mockResolvedValueOnce({ evaluation: { answer_quality_score: 60 }, game: { ...game, current_streak: 0, total_xp: 178 }, next_question: { ...second, index: 3 }, current_turn: 3, max_turns: 6 });
-  submit();
+  await submit();
   await screen.findByText('Streak 0');
 });
 it('retains an accepted answer and retries advancement only', async () => {
   api.nextQuestion.mockRejectedValueOnce(new Error('offline'));
-  await open(); submit();
+  await open(); await submit();
   await screen.findByRole('button', { name: 'Retry Advancement' });
-  expect(screen.getByRole('textbox')).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /Done answering/ })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Retry Advancement' }));
   await screen.findByRole('heading', { name: 'Answer Result' });
   expect(api.submitAnswer).toHaveBeenCalledTimes(1);
@@ -134,12 +147,14 @@ it('retains an accepted answer and retries advancement only', async () => {
 it('replays the exact payload after an uncertain submission and guards rapid clicks', async () => {
   let reject;
   api.submitAnswer.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
-  await open(); submit();
-  fireEvent.click(screen.getByRole('button', { name: 'Analyzing your answer…' }));
-  expect(api.submitAnswer).toHaveBeenCalledTimes(1);
+  await open();
+  const done = await screen.findByRole('button', { name: /Done answering/ });
+  fireEvent.click(done);
+  fireEvent.click(done);
+  await waitFor(() => expect(api.submitAnswer).toHaveBeenCalledTimes(1));
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(1);
   await act(async () => reject(new Error('offline')));
-  expect(screen.getByRole('textbox')).toHaveValue('State tracks changing component data.');
-  expect(screen.getByRole('textbox')).toBeDisabled();
+  expect(screen.getByText(`“${SPOKEN}”`)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Retry Submission' }));
   await screen.findByRole('heading', { name: 'Answer Result' });
   expect(api.submitAnswer.mock.calls[1][1]).toEqual(api.submitAnswer.mock.calls[0][1]);
@@ -149,8 +164,9 @@ it('shows Boss Round and finishes only after reviewing the final result', async 
   api.nextQuestion.mockResolvedValueOnce({ evaluation: { answer_quality_score: 88 }, game, is_complete: true, next_question: null });
   await open();
   expect(screen.getByRole('heading', { name: 'Boss Round' })).toBeInTheDocument();
-  submit();
+  await submit();
   await screen.findByRole('button', { name: 'Finish Arena' });
+  expect(api.submitAnswer).toHaveBeenCalledWith('arena-id', expect.objectContaining({ questionIndex: 6, candidateAnswer: SPOKEN }));
   expect(navigate).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Finish Arena' }));
   expect(navigate).toHaveBeenCalledWith('/arena/results');
@@ -182,4 +198,87 @@ it('offers retry after a failed start', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Retry Start' }));
   await play();
   expect(api.startInterview).toHaveBeenCalledTimes(2);
+});
+
+it('reads each question aloud once and records only after it has been read', async () => {
+  let finishSpeaking;
+  speech.speak.mockImplementation((source) => (source?.item === 'question-1'
+    ? new Promise((resolve) => { finishSpeaking = resolve; })
+    : Promise.resolve()));
+  await open();
+  expect(await screen.findByText('Interviewer is asking…')).toBeInTheDocument();
+  expect(recorder.start).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /Done answering/ })).not.toBeInTheDocument();
+  await act(async () => finishSpeaking());
+  expect(await screen.findByRole('button', { name: /Done answering/ })).toBeInTheDocument();
+  expect(speech.playTurnChime).toHaveBeenCalledTimes(1);
+  expect(recorder.start).toHaveBeenCalledTimes(1);
+  expect(speech.speak.mock.calls.filter(([source]) => source?.item === 'question-1')).toHaveLength(1);
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+});
+
+it('submits the transcript through the existing Arena answer call and shows what was heard', async () => {
+  await open(); await submit();
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(api.transcribeAnswer).toHaveBeenCalledWith('arena-id', 1, expect.any(Blob));
+  expect(api.submitAnswer).toHaveBeenCalledWith('arena-id', expect.objectContaining({
+    questionIndex: 1, questionText: question.question, candidateAnswer: SPOKEN, videoBlob: null,
+  }));
+  expect(api.nextQuestion).toHaveBeenCalledWith('arena-id', 'answer-id');
+  expect(screen.getByText('What we heard')).toBeInTheDocument();
+  expect(screen.getByText(`“${SPOKEN}”`)).toBeInTheDocument();
+});
+
+it('asks again when no speech is heard and never submits an empty answer', async () => {
+  api.transcribeAnswer.mockRejectedValueOnce(Object.assign(new Error('No speech'), { status: 422 }));
+  await open(); await speakAnswer();
+  expect(await screen.findByText('No speech detected. Please try answering again.')).toBeInTheDocument();
+  expect(speech.speak).toHaveBeenCalledWith({ phrase: 'no_speech' }, expect.any(String));
+  expect(api.submitAnswer).not.toHaveBeenCalled();
+  expect(api.nextQuestion).not.toHaveBeenCalled();
+  // Listening again; the second attempt is heard and submitted.
+  await speakAnswer();
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(recorder.start).toHaveBeenCalledTimes(2);
+  expect(api.submitAnswer).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the recording when transcription fails and retries with it', async () => {
+  api.transcribeAnswer.mockRejectedValueOnce(Object.assign(new Error('offline'), { status: 503 }));
+  await open(); await speakAnswer();
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(2);
+  expect(api.transcribeAnswer.mock.calls[1][2]).toBe(api.transcribeAnswer.mock.calls[0][2]);
+  expect(api.submitAnswer).toHaveBeenCalledTimes(1);
+});
+
+it('lets the candidate type when the browser cannot record audio', async () => {
+  recorder.start.mockReturnValue(null);
+  await open();
+  const box = await screen.findByRole('textbox', { name: 'Your answer' });
+  fireEvent.change(box, { target: { value: 'Typed instead.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Submit Answer' }));
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(api.submitAnswer).toHaveBeenCalledWith('arena-id', expect.objectContaining({ candidateAnswer: 'Typed instead.' }));
+  expect(api.transcribeAnswer).not.toHaveBeenCalled();
+});
+
+it('stops recording when the candidate leaves the Arena', async () => {
+  const cancel = vi.fn();
+  recorder.start.mockImplementation(() => ({ stop: vi.fn(), cancel }));
+  await open();
+  await screen.findByRole('button', { name: /Done answering/ });
+  cleanup();
+  expect(cancel).toHaveBeenCalled();
+  expect(speech.stopSpeaking).toHaveBeenCalled();
+});
+
+it('ends the spoken answer after three seconds of silence, as in the Standard Interview', async () => {
+  await open();
+  await screen.findByRole('button', { name: /Done answering/ });
+  monitor.snap = { speaking: false, speechMs: 2500, silenceMs: 3200, elapsedMs: 6000, level: 0 };
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(1);
+  expect(api.submitAnswer).toHaveBeenCalledTimes(1);
 });

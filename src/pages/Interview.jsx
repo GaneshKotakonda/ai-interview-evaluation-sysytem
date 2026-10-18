@@ -16,6 +16,9 @@ import { useAuth } from '../context/AuthContext';
 import { speak, stopSpeaking, playTurnChime } from '../services/speech';
 import { createVoiceMonitor } from '../services/voiceActivity';
 import { startAnswerRecording } from '../services/answerRecorder';
+import {
+  COUNTDOWN_FROM_MS, MAX_ANSWER_MS, MIN_SPEECH_MS, NO_VOICE_HINT_MS, SILENCE_TO_ADVANCE_MS, TICK_MS,
+} from '../services/answerPacing';
 import { startSessionRecording } from '../services/sessionRecorder';
 import { exitFullscreen, fullscreenSupported, hasMultipleDisplays } from '../services/proctoring';
 import { createAnswerSignals, isVirtualDevice } from '../services/malpracticeSignals';
@@ -25,18 +28,9 @@ import { STORAGE_KEYS, clearInterviewProgress, readAnswerMode, readCodingRound }
 // -------------------------------------------------------------
 // BLOCK 0: Interview pacing (voice mode)
 // -------------------------------------------------------------
-// Once the candidate has spoken, SILENCE_TO_ADVANCE_MS of silence moves on
-// to the next question; a countdown shows for the last two seconds and
-// speaking again cancels it.
-const SILENCE_TO_ADVANCE_MS = 3000;
-const COUNTDOWN_FROM_MS = 1000;
-// Spoken at least this long before silence can end an answer.
-const MIN_SPEECH_MS = 1200;
-// No voice at all after this long: show a "we can't hear you" hint.
-const NO_VOICE_HINT_MS = 20000;
-// Hard limit per answer.
-const MAX_ANSWER_MS = 3 * 60 * 1000;
-const TICK_MS = 200;
+// Silence, countdown and time limits live in services/answerPacing.js
+// (shared with the Arena): once the candidate has spoken, 3 seconds of
+// silence moves on to the next question.
 
 const STORAGE_KEY = STORAGE_KEYS.progress;
 const DURATION_KEY = STORAGE_KEYS.duration;
