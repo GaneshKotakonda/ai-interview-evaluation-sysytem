@@ -19,15 +19,17 @@ app = FastAPI(title="VPL code runner")
 
 
 class Test(BaseModel):
-    input: str = Field(default="", max_length=2_000_000)
+    # The largest bank test (shortest-paths, 200 000 edges) is about 3.5 MB.
+    input: str = Field(default="", max_length=8_000_000)
     expected: str | None = Field(default=None, max_length=2_000_000)
 
 
 class RunRequest(BaseModel):
     language: str
-    code: str = Field(max_length=code_runner.MAX_CODE_BYTES)
+    code: str = Field(max_length=code_runner.MAX_PROGRAM_BYTES)
     tests: list[Test] = Field(max_length=60)
     time_limit: float = Field(default=2.0, gt=0, le=10)
+    marker: str | None = Field(default=None, max_length=64)
 
 
 def _authorise(token: str | None):
@@ -46,6 +48,6 @@ def run(payload: RunRequest, x_runner_token: str | None = Header(default=None)):
     _authorise(x_runner_token)
     try:
         return code_runner.run_tests(payload.language, payload.code,
-                                     [t.model_dump() for t in payload.tests], payload.time_limit)
+                                     [t.model_dump() for t in payload.tests], payload.time_limit, payload.marker)
     except code_runner.RunnerError as err:
         raise HTTPException(422, str(err))

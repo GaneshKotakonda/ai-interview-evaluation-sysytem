@@ -1501,6 +1501,8 @@ class CodeRequest(BaseModel):
     language: Literal["python", "javascript", "cpp", "java"]
     code: str = Field(max_length=code_runner.MAX_CODE_BYTES)
     custom_input: Optional[str] = Field(default=None, max_length=20000)
+    # Function-style problems: the candidate's own value for each parameter.
+    custom_args: Optional[dict[str, str]] = Field(default=None, max_length=8)
     answer_signals: Optional[dict] = None
     recording_part: Optional[int] = Field(default=None, ge=1, le=50)
     answer_start_seconds: Optional[float] = Field(default=None, ge=0, le=86400)
@@ -1541,16 +1543,23 @@ def run_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depends(a
         history[0] += 1
         history[1] = time.monotonic()
 
-    tests = coding.examples_for(question["coding"])
-    if payload.custom_input is not None:
-        tests.append({"input": payload.custom_input,
-                      "expected": coding.custom_expected(question["coding_private"], payload.custom_input)})
+    public = question["coding"]
+    tests = coding.examples_for(public)
+    if payload.custom_args and sum(len(v) for v in payload.custom_args.values()) > 20000:
+        raise HTTPException(422, "Your input is too long.")
     try:
-        run = code_runner.run_tests(payload.language, payload.code, tests)
+        custom = coding.custom_test(public, question["coding_private"], payload.custom_input, payload.custom_args)
+    except ValueError as err:
+        raise HTTPException(422, str(err))
+    if custom:
+        tests.append(custom)
+    try:
+        run = coding.run(public, payload.language, payload.code, tests)
     except code_runner.RunnerError as err:
         raise HTTPException(503 if "unavailable" in str(err) else 422, str(err))
-    results = [{**result, "input": test["input"], "expected": test["expected"],
-                "custom": index >= len(question["coding"].get("examples") or [])}
+    results = [{**result, "stdout": coding.shown_output(public, result),
+                "input": test["input"], "expected": coding.shown(public, test["expected"]),
+                "custom": index >= len(public.get("examples") or [])}
                for index, (test, result) in enumerate(zip(tests, run["results"]))]
     return {"compiled": run["compiled"], "compile_output": run["compile_output"], "results": results,
             "runs_left": MAX_RUNS_PER_QUESTION - _runs[key][0]}
@@ -1574,7 +1583,7 @@ def submit_code(interview_id: str, payload: CodeRequest, user: AuthUser = Depend
     # Step B: run every test and review the code (no database work).
     tests = coding.tests_for(question["coding_private"])
     try:
-        run = code_runner.run_tests(payload.language, payload.code, tests)
+        run = coding.run(question["coding"], payload.language, payload.code, tests)
     except code_runner.RunnerError as err:
         raise HTTPException(503 if "unavailable" in str(err) else 422, str(err))
     evaluation = coding.grade({**question["coding"]}, payload.language, payload.code, run,

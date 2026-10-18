@@ -9,11 +9,16 @@ import { api } from '../services/api';
 // -------------------------------------------------------------
 // VPL workspace for one coding question
 // -------------------------------------------------------------
-// Left: the problem (statement, formats, constraints, worked examples).
-// Right: language menu, editor, Run (the visible examples, plus optional
-// custom input) and Submit (every test, hidden ones included, graded on
-// the server). Drafts are kept per language in this browser, so a reload
-// does not lose code. When the time runs out the code is submitted.
+// Left: the problem (statement, parameters and result, constraints, worked
+// examples). Right: language menu, editor, Run (the visible examples, plus
+// optional custom input) and Submit (every test, hidden ones included,
+// graded on the server). Drafts are kept per language in this browser, so a
+// reload does not lose code. When the time runs out the code is submitted.
+//
+// Problems are function-style (coding.mode === 'function'): the candidate
+// returns the answer from a Solution method, custom input is one value per
+// parameter, and anything printed is shown apart from the returned value.
+// Questions saved earlier read input and print, as before.
 const STATUS = {
   passed: ['Passed', 'ok'],
   wrong_answer: ['Wrong answer', 'bad'],
@@ -59,6 +64,11 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState('');
   const [customInput, setCustomInput] = useState('');
+  const functionMode = coding.mode === 'function';
+  const params = coding.signature?.params || [];
+  const [customArgs, setCustomArgs] = useState(() => Object.fromEntries(
+    params.map((param, index) => [param.name, coding.examples?.[0]?.args?.[index]?.value ?? '']),
+  ));
   const [useCustom, setUseCustom] = useState(false);
   const deadline = useMemo(() => Date.now() + (coding.minutes || 20) * 60 * 1000, [coding.minutes]);
   const [left, setLeft] = useState((coding.minutes || 20) * 60);
@@ -116,7 +126,8 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
     setRunError('');
     try {
       setRun(await api.runCode(interviewId, {
-        questionIndex: question.index, language, code, customInput: useCustom ? customInput : null,
+        questionIndex: question.index, language, code,
+        ...(functionMode ? { customArgs: useCustom ? customArgs : null } : { customInput: useCustom ? customInput : null }),
       }));
     } catch (error) {
       setRunError(error?.detail || 'The code could not be run. Try again in a moment.');
@@ -139,12 +150,19 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
         </div>
         <h2 className="font-serif text-[1.6rem] leading-snug text-ink">{coding.title}</h2>
         <p>{coding.statement}</p>
+        {functionMode && (
+          <p className="text-[13px]">
+            Complete the method <code className="rounded bg-sunken px-1 font-mono text-[12px] text-ink">{coding.signature?.method}</code> in
+            the <code className="rounded bg-sunken px-1 font-mono text-[12px] text-ink">Solution</code> class and return the answer.
+            There is no input to read and nothing to print.
+          </p>
+        )}
         <div>
-          <h3 className="text-[13px] font-semibold text-ink">Input</h3>
+          <h3 className="text-[13px] font-semibold text-ink">{functionMode ? 'Parameters' : 'Input'}</h3>
           <p>{coding.input_format}</p>
         </div>
         <div>
-          <h3 className="text-[13px] font-semibold text-ink">Output</h3>
+          <h3 className="text-[13px] font-semibold text-ink">{functionMode ? 'Returns' : 'Output'}</h3>
           <p>{coding.output_format}</p>
         </div>
         {coding.constraints?.length > 0 && (
@@ -157,8 +175,11 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
           <div key={index}>
             <h3 className="text-[13px] font-semibold text-ink">Example {index + 1}</h3>
             <div className="grid gap-2 sm:grid-cols-2">
-              <div><span className="text-xs text-ink-3">Input</span><Block>{example.input}</Block></div>
-              <div><span className="text-xs text-ink-3">Output</span><Block>{example.expected}</Block></div>
+              <div>
+                <span className="text-xs text-ink-3">Input</span>
+                <Block>{example.args ? example.args.map((arg) => `${arg.name} = ${arg.value}`).join('\n') : example.input}</Block>
+              </div>
+              <div><span className="text-xs text-ink-3">Output</span><Block>{example.expected_display ?? example.expected}</Block></div>
             </div>
             {example.explanation && <p className="mt-1 text-xs text-ink-3">{example.explanation}</p>}
           </div>
@@ -194,7 +215,23 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
           <label className="flex items-center gap-2 text-xs text-ink-2">
             <input type="checkbox" checked={useCustom} onChange={(event) => setUseCustom(event.target.checked)} /> Also run my own input
           </label>
-          {useCustom && (
+          {useCustom && functionMode && (
+            <div className="grid gap-2">
+              {params.map((param) => (
+                <label key={param.name} className="grid gap-1 text-xs text-ink-3">
+                  <span><span className="font-mono text-ink">{param.name}</span> ({param.type})</span>
+                  <input
+                    aria-label={`Your value for ${param.name}`}
+                    value={customArgs[param.name] ?? ''}
+                    onChange={(event) => setCustomArgs((current) => ({ ...current, [param.name]: event.target.value }))}
+                    className="input-field font-mono !text-[12px]"
+                    spellCheck={false}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+          {useCustom && !functionMode && (
             <textarea
               aria-label="Custom input"
               rows={3}
@@ -205,7 +242,10 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
             />
           )}
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs text-ink-3">{run?.runs_left !== undefined ? `${run.runs_left} runs left` : 'Run checks the examples; Submit runs every test.'}</span>
+            <span className="text-xs text-ink-3">
+              {run?.runs_left !== undefined ? `${run.runs_left} runs left` : 'Run checks the examples; Submit runs every test.'}
+              {functionMode && ' Anything you print is shown separately and is not graded.'}
+            </span>
             <div className="flex gap-2">
               <button type="button" className="secondary-btn !py-2" onClick={runExamples} disabled={running || submitting}>
                 {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Run
@@ -236,8 +276,9 @@ export default function CodingWorkspace({ interviewId, question, onSubmit, submi
                     </summary>
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
                       <div><span className="text-xs text-ink-3">Expected</span><Block>{result.expected ?? '(not available for custom input)'}</Block></div>
-                      <div><span className="text-xs text-ink-3">Your output</span><Block>{result.stdout || ' '}</Block></div>
+                      <div><span className="text-xs text-ink-3">{functionMode ? 'Returned' : 'Your output'}</span><Block>{result.stdout || ' '}</Block></div>
                     </div>
+                    {result.printed && <div className="mt-2"><span className="text-xs text-ink-3">Printed (not graded)</span><Block>{result.printed}</Block></div>}
                     {result.stderr && <div className="mt-2"><span className="text-xs text-ink-3">Errors</span><Block>{result.stderr}</Block></div>}
                   </details>
                 );

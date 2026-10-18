@@ -304,12 +304,13 @@ export const api = {
   },
 
   // 6g. Run code on the visible examples (and optionally your own input).
-  runCode(interviewId, { questionIndex, language, code, customInput }) {
+  runCode(interviewId, { questionIndex, language, code, customInput, customArgs }) {
     return request(interviewPath(interviewId, 'code/run'), {
       method: 'POST',
       json: {
         question_index: questionIndex, language, code,
         ...(customInput !== undefined && customInput !== null ? { custom_input: customInput } : {}),
+        ...(customArgs ? { custom_args: customArgs } : {}),
       },
     }, 'Failed to run code');
   },

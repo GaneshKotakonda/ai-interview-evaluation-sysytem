@@ -5,14 +5,20 @@ instead of a spoken question (``coding_turns``): turns 2 and 4 of a
 five-question interview, turns 3 and 5 of a six-level Arena (the Boss
 Round stays a spoken/typed question).
 
+Problems are function-style (coding_functions.py): the candidate returns
+the answer from a ``Solution`` method. Questions saved before that change
+have no ``mode`` and still run as programs that read input and print.
+
 Grading: 70% hidden and visible test cases, 30% an AI review of efficiency
 and code quality. Code that passes no test scores at most 20; an empty or
 untouched starter scores 0. Without an AI review the tests decide alone.
 """
 from typing import Optional
 
+import code_runner
 import coding_ai
 import coding_bank
+import coding_functions
 import config
 import gemini_service
 
@@ -73,11 +79,11 @@ def question_content(cur, interview, difficulty: str) -> dict:
 
     if record is None:
         public = coding_bank.public(problem)
-        private = {"source": "bank", "problem_id": problem.id}
+        private = {"source": "bank", "problem_id": problem.id, "mode": "function"}
         rubric, complexity = problem.rubric, problem.complexity
     else:
         public, rubric, complexity = record["public"], record["rubric"], record["complexity"]
-        private = {"source": "ai", "problem_id": public["problem_id"], "tests": record["tests"]}
+        private = {"source": "ai", "problem_id": public["problem_id"], "tests": record["tests"], "mode": "function"}
     public["complexity"] = complexity
     public["minutes"] = config.CODING_MINUTES_PER_PROBLEM
     return {
@@ -94,9 +100,18 @@ def question_content(cur, interview, difficulty: str) -> dict:
     }
 
 
+def is_function(public: dict) -> bool:
+    return public.get("mode") == "function"
+
+
+def signature(public: dict) -> coding_functions.Signature:
+    return coding_functions.Signature.from_dict(public["signature"])
+
+
 def tests_for(private: dict) -> list[dict]:
     if private.get("source") == "bank":
-        return coding_bank.tests(coding_bank.BY_ID[private["problem_id"]])
+        problem = coding_bank.BY_ID[private["problem_id"]]
+        return coding_bank.function_tests(problem) if private.get("mode") == "function" else coding_bank.tests(problem)
     return list(private.get("tests") or [])
 
 
@@ -104,14 +119,46 @@ def examples_for(public: dict) -> list[dict]:
     return [{"input": e["input"], "expected": e["expected"]} for e in public.get("examples") or []]
 
 
-def custom_expected(private: dict, text: str) -> Optional[str]:
-    """Expected output for the candidate's own input (bank problems only)."""
-    if private.get("source") != "bank":
+def custom_test(public: dict, private: dict, custom_input: Optional[str], custom_args: Optional[dict]) -> Optional[dict]:
+    """The candidate's own test, or None. Raises ValueError for a bad argument.
+
+    Function mode takes one value per parameter (``custom_args``); the
+    expected output is known for bank problems only."""
+    bank = coding_bank.BY_ID.get(private.get("problem_id")) if private.get("source") == "bank" else None
+    if not is_function(public):
+        if custom_input is None:
+            return None
+        try:
+            expected = bank.solve(custom_input) if bank else None
+        except Exception:
+            expected = None  # not a valid input for this problem
+        return {"input": custom_input, "expected": expected}
+    if custom_args is None:
         return None
-    try:
-        return coding_bank.BY_ID[private["problem_id"]].solve(text)
-    except Exception:
-        return None  # not a valid input for this problem
+    sig = signature(public)
+    args = [coding_functions.parse_literal(name, kind, custom_args.get(name)) for name, kind in sig.params]
+    return {"input": coding_functions.encode(sig, args),
+            "expected": coding_bank.custom_expected(bank, args) if bank else None}
+
+
+def run(public: dict, language: str, code: str, tests: list[dict]) -> dict:
+    """Run a solution on tests, as a function or as a program (older questions)."""
+    if is_function(public):
+        return coding_functions.run(signature(public), language, code, tests)
+    return code_runner.run_tests(language, code, tests)
+
+
+def shown_output(public: dict, result: dict) -> str:
+    """What a run printed (older questions) or returned (function mode)."""
+    if not is_function(public):
+        return result["stdout"]
+    returned = result["status"] in ("passed", "wrong_answer", "ran")
+    return shown(public, result["stdout"]) if returned else ""
+
+
+def shown(public: dict, text: Optional[str]) -> Optional[str]:
+    """A returned or expected value as the candidate sees it ([0,1], true)."""
+    return coding_functions.display(signature(public).returns, text) if is_function(public) else text
 
 
 # -------------------------------------------------------------

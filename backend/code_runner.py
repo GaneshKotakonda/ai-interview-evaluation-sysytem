@@ -15,6 +15,11 @@ Isolation:
     access, a read-only filesystem and memory/CPU/process limits.
 
 Output is compared token by token (whitespace-insensitive).
+
+Function-style problems (coding_functions.py) pass a ``marker``: the hidden
+driver prints it before the returned value, so only the text after it is
+compared, and what the candidate printed before it is returned as
+``printed``.
 """
 import logging
 import os
@@ -32,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 IS_WINDOWS = os.name == "nt"
 MAX_CODE_BYTES = 64 * 1024
+# The candidate's code plus a hidden test driver (coding_functions.py).
+MAX_PROGRAM_BYTES = MAX_CODE_BYTES + 16 * 1024
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 COMPILE_TIMEOUT_SECONDS = 30
 # After this many time-outs the remaining tests are skipped (saves minutes).
@@ -69,7 +76,10 @@ def _commands(language: str, folder: str) -> tuple[Optional[list], list]:
         return None, [shutil.which("node") or "node", "--max-old-space-size=256", "main.js"]
     if language == "cpp":
         binary = os.path.join(folder, "main.exe" if IS_WINDOWS else "main")
-        return ([shutil.which("g++") or "g++", "-O2", "-std=c++17", "-o", binary, "main.cpp"], [binary])
+        # No source excerpts in errors: a hidden prelude (coding_functions.py) shifts
+        # the file's lines, but the reported line numbers stay right.
+        return ([shutil.which("g++") or "g++", "-O2", "-std=c++17", "-fno-diagnostics-show-caret",
+                 "-o", binary, "main.cpp"], [binary])
     if language == "java":
         return ([shutil.which("javac") or "javac", "-encoding", "UTF-8", "Main.java"],
                 [shutil.which("java") or "java", "-Xmx256m", "-Xss64m", "-XX:+UseSerialGC", "Main"])
@@ -142,7 +152,17 @@ def outputs_match(actual: str, expected: str) -> bool:
     return actual.split() == expected.split()
 
 
-def _run_local(language: str, code: str, tests: list[dict], time_limit: float) -> dict:
+def _split_marker(stdout: str, marker: Optional[str]) -> tuple[Optional[str], str]:
+    """(returned value, printed text); returned is None without the marker."""
+    if not marker:
+        return stdout, ""
+    index = stdout.rfind(marker)
+    if index < 0:
+        return None, stdout
+    return stdout[index + len(marker):], stdout[:index].rstrip("\n")
+
+
+def _run_local(language: str, code: str, tests: list[dict], time_limit: float, marker: Optional[str] = None) -> dict:
     spec = LANGUAGES[language]
     limit = time_limit * spec["time_factor"]
     with _slots, tempfile.TemporaryDirectory(prefix="vpl-") as folder:
@@ -161,6 +181,7 @@ def _run_local(language: str, code: str, tests: list[dict], time_limit: float) -
                 results.append({"status": "skipped", "time_ms": 0, "stdout": "", "stderr": ""})
                 continue
             run = _execute(run_command, folder, test.get("input", ""), limit)
+            returned, printed = _split_marker(run["stdout"], marker)
             if run["timed_out"]:
                 status = "time_limit"
                 timeouts += 1
@@ -168,12 +189,17 @@ def _run_local(language: str, code: str, tests: list[dict], time_limit: float) -
                 status = "runtime_error"
             elif run["output_truncated"]:
                 status = "output_limit"
+            elif returned is None:
+                status = "runtime_error"  # stopped before returning a value
             elif "expected" in test and test["expected"] is not None:
-                status = "passed" if outputs_match(run["stdout"], test["expected"]) else "wrong_answer"
+                status = "passed" if outputs_match(returned, test["expected"]) else "wrong_answer"
             else:
                 status = "ran"
-            results.append({"status": status, "time_ms": run["time_ms"], "stdout": run["stdout"][:4000],
-                            "stderr": run["stderr"].replace(folder, "")[-1500:]})
+            result = {"status": status, "time_ms": run["time_ms"], "stdout": (returned or "")[:4000],
+                      "stderr": run["stderr"].replace(folder, "")[-1500:]}
+            if marker:
+                result["printed"] = printed[-2000:]
+            results.append(result)
     passed = sum(1 for r in results if r["status"] == "passed")
     return {"compiled": True, "compile_output": "", "results": results, "passed": passed, "total": len(tests)}
 
@@ -190,20 +216,24 @@ def _remote(method: str, path: str, payload: Optional[dict] = None):
         raise RunnerError("The code runner is unavailable. Please try again.") from err
 
 
-def run_tests(language: str, code: str, tests: list[dict], time_limit: Optional[float] = None) -> dict:
+def run_tests(language: str, code: str, tests: list[dict], time_limit: Optional[float] = None,
+              marker: Optional[str] = None) -> dict:
     """Run ``code`` on every test ``{input, expected?}``.
 
     Returns ``{compiled, compile_output, results: [{status, time_ms, stdout,
     stderr}], passed, total}``. status: passed | wrong_answer | time_limit |
     runtime_error | output_limit | skipped | ran (no expected output).
+    With ``marker``, ``stdout`` is the text after it and ``printed`` the text
+    before it; a run that never printed the marker is a runtime error.
     """
     if language not in LANGUAGES:
         raise RunnerError(f"Unsupported language '{language}'.")
-    if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+    if len(code.encode("utf-8")) > (MAX_PROGRAM_BYTES if marker else MAX_CODE_BYTES):
         raise RunnerError("The code is too long.")
     limit = time_limit or config.CODE_TIME_LIMIT_SECONDS
     if config.CODE_RUNNER_URL:
-        return _remote("POST", "/run", {"language": language, "code": code, "tests": tests, "time_limit": limit})
+        return _remote("POST", "/run", {"language": language, "code": code, "tests": tests, "time_limit": limit,
+                                        "marker": marker})
     if language not in {item["id"] for item in available_languages()}:
         raise RunnerError(f"{LANGUAGES[language]['label']} is not installed on this server.")
-    return _run_local(language, code, tests, limit)
+    return _run_local(language, code, tests, limit, marker)

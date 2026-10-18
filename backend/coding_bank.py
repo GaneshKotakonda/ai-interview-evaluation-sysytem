@@ -1,61 +1,27 @@
 """Curated coding problems for the VPL coding round.
 
-Every problem reads standard input and prints to standard output. Each one
-has a reference solution (``solve``) and a seeded test generator
-(``generate``): the expected output of every test, visible or hidden, is
-computed by the reference solution, so test cases are always consistent.
+The candidate implements one method of a ``Solution`` class and returns the
+answer (FUNCTIONS: the signature, what the parameters and the result are,
+and converters). Internally every test is still a standard-input text with
+the expected printed output: each problem has a reference solution
+(``solve``) over that text and a seeded test generator (``generate``), so
+expected outputs are computed, never hand-written, and always consistent.
+The hidden driver (coding_functions.py) turns each test into a method call.
 Hidden tests include edge cases and large inputs that only an efficient
 algorithm finishes within the time limit.
 
-``public(problem)`` is what the candidate sees; ``tests(problem)`` stays on
-the server. AI-generated problems (coding_ai.py) use the same shapes.
+``public(problem)`` is what the candidate sees; ``function_tests(problem)``
+stays on the server. ``tests(problem)`` is the original text form, still
+used to grade questions saved before function mode. AI-generated problems
+(coding_ai.py) use the same shapes.
 """
 import heapq
 import random
 from dataclasses import dataclass, field
 from typing import Callable
 
-STARTER = {
-    "python": '''import sys
-
-
-def main():
-    data = sys.stdin.read().split()
-    # {hint}
-    # Read the input from `data`, solve the problem and print the answer.
-
-
-if __name__ == "__main__":
-    main()
-''',
-    "javascript": '''const data = require("fs").readFileSync(0, "utf8").trim().split(/\\s+/);
-// {hint}
-// Read the input from `data`, solve the problem and print the answer with console.log.
-''',
-    "cpp": '''#include <bits/stdc++.h>
-using namespace std;
-
-int main() {{
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
-    // {hint}
-    // Read the input with cin, solve the problem and print the answer with cout.
-    return 0;
-}}
-''',
-    "java": '''import java.io.*;
-import java.util.*;
-
-public class Main {{
-    public static void main(String[] args) throws IOException {{
-        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
-        // {hint}
-        // Read the input, solve the problem and print the answer with System.out.println.
-    }}
-}}
-''',
-}
-
+import coding_functions as cf
+from coding_functions import Signature
 
 @dataclass
 class Problem:
@@ -526,14 +492,129 @@ LEVEL = {"easy": "easy", "medium": "medium", "hard": "hard", "expert": "hard"}
 _test_cache: dict[str, list[dict]] = {}
 
 
+# -------------------------------------------------------------
+# Function form: what the candidate implements
+# -------------------------------------------------------------
+@dataclass(frozen=True)
+class FunctionSpec:
+    signature: Signature
+    parameters: str                   # shown under "Parameters"
+    returns: str                      # shown under "Returns"
+    to_args: Callable[[str], list]    # a test input -> the method's arguments
+    to_text: Callable[..., str]       # the arguments -> a test input (custom input)
+
+
+def _list(text: str) -> list[int]:
+    data = _ints(text)
+    return data[1:1 + data[0]]
+
+
+def _list_and_number(text: str) -> list:
+    data = _ints(text)
+    return [data[1:1 + data[0]], data[1 + data[0]]]
+
+
+def _intervals(text: str) -> list:
+    data = _ints(text)
+    return [[[data[1 + 2 * i], data[2 + 2 * i]] for i in range(data[0])]]
+
+
+def _grid(text: str) -> list:
+    lines = text.split()
+    return [lines[2:2 + int(lines[0])]]
+
+
+def _words(text: str) -> list:
+    lines = text.split("\n")
+    return [lines[0].strip(), lines[1].strip() if len(lines) > 1 else ""]
+
+
+def _graph(text: str) -> list:
+    data = _ints(text)
+    n, m, source = data[0], data[1], data[2]
+    return [n, [data[3 + 3 * k: 6 + 3 * k] for k in range(m)], source]
+
+
+def _array_only(name, method, parameters, returns, result="int"):
+    return FunctionSpec(Signature(method, ((name, "int[]"),), result), parameters, returns, lambda t: [_list(t)], _array)
+
+
+def _string_only(method, parameters, returns, result, to_args):
+    return FunctionSpec(Signature(method, (("s", "string"),), result), parameters, returns, to_args, lambda s: s + "\n")
+
+
+FUNCTIONS = {
+    "two-sum": FunctionSpec(
+        Signature("twoSum", (("nums", "int[]"), ("target", "long")), "int[]"),
+        "nums: the array of integers. target: the sum to find.",
+        "The two 0-based indices [i, j] with i < j. Exactly one answer exists.",
+        _list_and_number, lambda nums, target: _array(nums) + f"{target}\n"),
+    "valid-brackets": _string_only(
+        "isValid", "s: a string of the characters ( ) [ ] { }.",
+        "true if every bracket is closed by the same type in the correct order, otherwise false.", "bool",
+        lambda t: [t.strip()]),
+    "valid-palindrome": _string_only(
+        "isPalindrome", "s: the phrase.", "true if s is a palindrome (letters and digits only, ignoring case), otherwise false.",
+        "bool", lambda t: [t.rstrip("\n")]),
+    "second-largest": _array_only("nums", "secondLargest", "nums: the array of integers.",
+                                  "The second largest distinct value, or -1 if all values are equal."),
+    "missing-number": _array_only("nums", "missingNumber", "nums: n distinct integers from 0..n.", "The missing number."),
+    "max-subarray": _array_only("nums", "maxSubarraySum", "nums: the array of integers.",
+                                "The largest sum of a non-empty contiguous subarray."),
+    "longest-unique-substring": _string_only(
+        "lengthOfLongestSubstring", "s: the string (letters and digits).",
+        "The length of the longest substring without a repeated character.", "int", lambda t: [t.strip()]),
+    "merge-intervals": FunctionSpec(
+        Signature("merge", (("intervals", "int[][]"),), "int[][]"),
+        "intervals: the intervals, each [l, r] with l ≤ r.",
+        "The merged intervals in increasing order, each as [l, r].",
+        _intervals, lambda intervals: f"{len(intervals)}\n" + "".join(f"{a} {b}\n" for a, b in intervals)),
+    "number-of-islands": FunctionSpec(
+        Signature("numIslands", (("grid", "string[]"),), "int"),
+        "grid: the rows of the grid, each a string of 0 (water) and 1 (land).",
+        "The number of islands.",
+        _grid, lambda grid: f"{len(grid)} {len(grid[0]) if grid else 0}\n" + "".join(row + "\n" for row in grid)),
+    "coin-change": FunctionSpec(
+        Signature("coinChange", (("coins", "int[]"), ("amount", "int")), "int"),
+        "coins: the distinct coin values. amount: the amount to make.",
+        "The minimum number of coins, or -1 if the amount cannot be made.",
+        _list_and_number, lambda coins, amount: _array(coins) + f"{amount}\n"),
+    "daily-temperatures": _array_only("temperatures", "dailyTemperatures", "temperatures: the temperature of each day.",
+                                      "For each day, the number of days until a warmer one (0 if none).", "int[]"),
+    "longest-increasing-subsequence": _array_only("nums", "lengthOfLIS", "nums: the array of integers.",
+                                                  "The length of the longest strictly increasing subsequence."),
+    "edit-distance": FunctionSpec(
+        Signature("minDistance", (("word1", "string"), ("word2", "string")), "int"),
+        "word1, word2: lowercase words (either may be empty).",
+        "The minimum number of insertions, deletions and replacements that turn word1 into word2.",
+        _words, lambda word1, word2: f"{word1}\n{word2}\n"),
+    "shortest-paths": FunctionSpec(
+        Signature("shortestPaths", (("n", "int"), ("edges", "int[][]"), ("source", "int")), "int[]"),
+        "n: the number of nodes (1..n). edges: the undirected edges, each [u, v, w] with weight w. source: the start node.",
+        "The distances to nodes 1..n in order, with -1 for a node that cannot be reached.",
+        _graph, lambda n, edges, source: f"{n} {len(edges)} {source}\n" + "".join(" ".join(map(str, e)) + "\n" for e in edges)),
+    "trapping-rain-water": _array_only("height", "trap", "height: the height of each bar (width 1).",
+                                       "The total amount of trapped rain water."),
+}
+
+
 def examples(problem: Problem) -> list[dict]:
-    return [{"input": text, "expected": problem.solve(text),
-             "explanation": problem.explanations[i] if i < len(problem.explanations) else None}
-            for i, text in enumerate(problem.examples)]
+    spec = FUNCTIONS[problem.id]
+    signature = spec.signature
+    shown = []
+    for i, text in enumerate(problem.examples):
+        args, expected = spec.to_args(text), problem.solve(text)
+        shown.append({
+            "args": [{"name": name, "value": cf.literal(kind, value)} for (name, kind), value in zip(signature.params, args)],
+            "input": cf.encode(signature, args), "expected": expected,
+            "expected_display": cf.display(signature.returns, expected),
+            "explanation": problem.explanations[i] if i < len(problem.explanations) else None,
+        })
+    return shown
 
 
 def tests(problem: Problem) -> list[dict]:
-    """Every test (examples first, then hidden), with expected outputs."""
+    """Every test as text (examples first, then hidden), with expected outputs."""
     if problem.id not in _test_cache:
         rng = random.Random(f"vpl:{problem.id}")
         inputs = problem.examples + problem.edge_cases + problem.generate(rng)
@@ -541,19 +622,34 @@ def tests(problem: Problem) -> list[dict]:
     return _test_cache[problem.id]
 
 
-def starter_code(problem: Problem) -> dict:
-    hint = f"Input: {problem.input_format}"
-    return {language: template.replace("{hint}", hint).replace("{{", "{").replace("}}", "}")
-            for language, template in STARTER.items()}
+_function_test_cache: dict[str, list[dict]] = {}
+
+
+def function_tests(problem: Problem) -> list[dict]:
+    """The same tests as method calls (the hidden driver's input)."""
+    if problem.id not in _function_test_cache:
+        spec = FUNCTIONS[problem.id]
+        _function_test_cache[problem.id] = [{"input": cf.encode(spec.signature, spec.to_args(t["input"])), "expected": t["expected"]}
+                                            for t in tests(problem)]
+    return _function_test_cache[problem.id]
+
+
+def custom_expected(problem: Problem, args: list):
+    """Expected output for the candidate's own arguments (None if not valid)."""
+    try:
+        return problem.solve(FUNCTIONS[problem.id].to_text(*args))
+    except Exception:
+        return None
 
 
 def public(problem: Problem) -> dict:
     """Everything the candidate sees: no hidden tests, no solution."""
+    spec = FUNCTIONS[problem.id]
     return {
         "problem_id": problem.id, "title": problem.title, "difficulty": problem.difficulty, "tags": problem.tags,
-        "statement": problem.statement, "input_format": problem.input_format,
-        "output_format": problem.output_format, "constraints": problem.constraints,
-        "examples": examples(problem), "starter_code": starter_code(problem),
+        "statement": problem.statement, "mode": "function", "signature": spec.signature.as_dict(),
+        "input_format": spec.parameters, "output_format": spec.returns, "constraints": problem.constraints,
+        "examples": examples(problem), "starter_code": cf.starter(spec.signature),
         "hidden_tests": len(tests(problem)) - len(problem.examples),
     }
 
