@@ -16,6 +16,7 @@ import Leaderboard from './pages/Leaderboard';
 import MyInterviews from './pages/MyInterviews';
 import Reports from './pages/Reports';
 import Profile from './pages/Profile';
+import Admin from './pages/Admin';
 
 // -------------------------------------------------------------
 // Route table.
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/interviews" element={<MyInterviews />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/admin" element={<Admin />} />
         </Route>
       </Route>
 

@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react';
 import {
+  BarChart3,
   FileText,
   Gamepad2,
   History,
@@ -11,6 +13,7 @@ import {
 } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { api } from '../services/api';
 import { clearInterviewProgress } from '../utils/interviewJourney';
 import { Brand } from './ui';
 
@@ -43,6 +46,19 @@ export default function Sidebar({ mobileOpen, onClose }) {
   const navigate = useNavigate();
   const displayName = user?.displayName || 'Candidate';
   const initial = displayName.charAt(0).toUpperCase();
+  // The Usage page link shows only for the owner (the server decides).
+  const [owner, setOwner] = useState(false);
+  useEffect(() => {
+    let active = true;
+    if (!user) return undefined;
+    Promise.resolve(api.getAdminAccess?.())
+      .then((access) => { if (active) setOwner(Boolean(access?.owner)); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [user]);
+  const visibleGroups = owner
+    ? [...groups, { title: 'Owner', items: [{ label: 'Usage', icon: BarChart3, to: '/admin' }] }]
+    : groups;
 
   const handleLogout = async () => {
     await logout();
@@ -71,7 +87,7 @@ export default function Sidebar({ mobileOpen, onClose }) {
         </div>
 
         <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-4">
-          {groups.map((group) => (
+          {visibleGroups.map((group) => (
             <div key={group.title}>
               <p className="px-3 pb-1.5 text-[11px] font-medium text-ink-4">{group.title}</p>
               <ul className="space-y-0.5">

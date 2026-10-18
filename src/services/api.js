@@ -335,6 +335,15 @@ export const api = {
   },
 
   // 6j. Arena ranking: leaderboard of a category ('overall' by default).
+  // Owner-only usage overview. getAdminAccess tells the sidebar whether to
+  // show the link; the overview is a 404 for everyone but the owner.
+  getAdminAccess() {
+    return request(`${API_BASE_URL}/api/admin/access`, {}, 'Failed to check access');
+  },
+  getAdminOverview() {
+    return request(`${API_BASE_URL}/api/admin/overview`, {}, 'Failed to load usage');
+  },
+
   getLeaderboard(category = 'overall', limit = 50) {
     return request(`${API_BASE_URL}/api/arena/leaderboard?category=${encodeURIComponent(category)}&limit=${limit}`, {},
       'Failed to load leaderboard');

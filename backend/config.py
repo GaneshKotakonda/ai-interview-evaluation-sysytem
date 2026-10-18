@@ -127,6 +127,11 @@ COUNTER_CHEATING_MAX_CHALLENGES = max(0, min(2, _env_int("COUNTER_CHEATING_MAX_C
 CODE_RUNNER_URL = _env_str("CODE_RUNNER_URL")
 RUNNER_TOKEN = _env_str("RUNNER_TOKEN")
 CODE_TIME_LIMIT_SECONDS = float(_env_str("CODE_TIME_LIMIT_SECONDS", "2"))
+
+# The one owner who may open the usage overview (admin.py). Set both in the
+# server's private .env only; if either is empty, nobody has access.
+ADMIN_UID = _env_str("ADMIN_UID")
+ADMIN_EMAIL = _env_str("ADMIN_EMAIL")
 CODING_MINUTES_PER_PROBLEM = _env_int("CODING_MINUTES_PER_PROBLEM", 20)
 
 # Identity verification (identity.py): the enrolled voice and face are

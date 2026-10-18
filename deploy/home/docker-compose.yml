@@ -43,6 +43,9 @@ services:
       # The Vercel website address(es) allowed to call this API.
       CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS in deploy/home/.env to your Vercel address}
       STT_MODEL: ${STT_MODEL:-base.en}
+      # The only account allowed to open the usage overview (both must match).
+      ADMIN_UID: ${ADMIN_UID:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       CODE_RUNNER_URL: http://runner:8080
       RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in deploy/home/.env}
     networks: [default, runner]

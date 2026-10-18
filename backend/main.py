@@ -68,6 +68,7 @@ import integrity
 import gemini_service
 import assessment
 import coding
+import admin
 import code_runner
 import identity
 import malpractice
@@ -1611,6 +1612,23 @@ def _public_coding(response) -> dict:
     result = response.get("coding_result") or {}
     return {key: result.get(key) for key in ("passed", "total", "compiled", "examples_passed",
                                               "hidden_passed", "language")}
+
+
+# -------------------------------------------------------------
+# BLOCK 13h2: Owner-only usage overview (admin.py)
+# -------------------------------------------------------------
+# Only the owner set in the server's .env (ADMIN_UID and ADMIN_EMAIL) gets
+# data; for everyone else the overview does not exist (404).
+@app.get("/api/admin/access")
+def admin_access(user: AuthUser = Depends(auth.current_user)):
+    return {"owner": admin.is_owner(user)}
+
+
+@app.get("/api/admin/overview")
+def admin_overview(user: AuthUser = Depends(auth.current_user)):
+    admin.require_owner(user)
+    with transaction("Could not load the overview. Please retry.") as (_conn, cur):
+        return admin.overview(cur)
 
 
 # -------------------------------------------------------------

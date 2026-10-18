@@ -199,7 +199,7 @@ export default function Dashboard() {
           i={3}
           index="02"
           title="Interview Arena"
-          description="Shorter, game-style practice. Answer adaptive challenges in text, build streaks and finish with a boss round."
+          description="Shorter, game-style practice. Answer adaptive challenges out loud, build streaks and finish with a boss round."
           meta={['Adaptive Challenges', 'XP & Levels', 'Streaks', 'Boss Round']}
           action={(
             <button onClick={() => navigate('/arena')} className="btn bg-paper text-ink hover:bg-white">
