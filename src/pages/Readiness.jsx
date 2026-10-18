@@ -25,7 +25,7 @@ const ROLE_TITLE_MAX = 100;
 // Same idea as the server's coding.suggests_coding: roles that write code.
 const CODING_WORDS = ['software', 'developer', 'engineer', 'programm', 'coding', 'algorithm', 'data structure', 'dsa',
   'python', 'java', 'javascript', 'typescript', 'c++', 'backend', 'back-end', 'full stack', 'fullstack', 'frontend',
-  'front-end', 'react', 'node', 'leetcode'];
+  'front-end', 'react', 'node'];
 export const suggestsCoding = (text) => CODING_WORDS.some((word) => (text || '').toLowerCase().includes(word));
 const JOB_DESCRIPTION_MAX = 4000; // the backend uses at most 4000 characters
 

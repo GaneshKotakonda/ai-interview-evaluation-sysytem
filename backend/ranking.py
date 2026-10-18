@@ -1,4 +1,4 @@
-"""Arena ranking: LeetCode-style ratings, overall and per category.
+"""Arena ranking: Elo-style ratings, overall and per category.
 
 Every candidate starts at 1500 in each category and overall. A finished
 ranked Arena changes the rating of its category and the overall rating:

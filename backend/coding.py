@@ -24,7 +24,7 @@ NO_TEST_PASSED_CAP = 20
 CODING_KEYWORDS = (
     "software", "developer", "engineer", "programm", "coding", "algorithm", "data structure", "dsa",
     "python", "java", "javascript", "typescript", "c++", "backend", "back-end", "full stack", "fullstack",
-    "frontend", "front-end", "react", "node", "leetcode",
+    "frontend", "front-end", "react", "node",
 )
 
 

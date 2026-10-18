@@ -12,7 +12,7 @@ How and where to run MAESTRO in production. Status: **ready to deploy, not deplo
 - Knowledge Verification in Standard interviews: eligible stored evidence can replace a scheduled turn with a targeted challenge; ordinary grading supplies its raw result and the report shows evidence → request → concept → result. See [policy, configuration and validation limits](COUNTER_CHEATING.md).
 - Stricter grading: calibrated bands and caps for short, off-topic, incorrect or keyword-only answers.
 - Coding round with the built-in VPL: editor, examples, hidden tests, 70% tests + 30% AI code review; code runs in the isolated `runner` container.
-- Ranked Interview Arena: proctored, LeetCode-style rating with overall and category ranks, leaderboard, rating penalties for integrity warnings and leaving.
+- Ranked Interview Arena: proctored, Elo-style rating with overall and category ranks, leaderboard, rating penalties for integrity warnings and leaving.
 - Rules read aloud before every session; 3 warnings or 5 seconds away end it; sidebar hidden during sessions; 3-second silence moves to the next question.
 - History, reports, profile, Firebase sign-in with server-side token checks.
 

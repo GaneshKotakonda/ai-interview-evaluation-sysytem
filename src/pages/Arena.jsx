@@ -25,7 +25,7 @@ const areas = [
 
 // What the Arena is for.
 export const ARENA_USES = [
-  ['Ranked practice', 'A LeetCode-style rating shows where you stand among every other student, overall and per category.'],
+  ['Ranked practice', 'An Elo-style rating shows where you stand among every other student, overall and per category.'],
   ['Category ranks', 'Separate ranks for Frontend, Backend, Java, SQL, DSA and more show which area to work on.'],
   ['Interview readiness', 'Adaptive levels get harder as you improve, ending with a Boss Round, like a real technical round.'],
   ['Coding practice', 'Coding areas include problems with hidden test cases in the built-in code editor (VPL).'],
@@ -39,7 +39,7 @@ const rules = [
   ['Difficulty bonus', 'Hard and expert levels'],
   ['Streak bonus', 'Consecutive strong answers'],
   ['Hint', '−20 XP on that turn'],
-  ['Rating', 'Score vs. difficulty, like LeetCode'],
+  ['Rating', 'Score vs. difficulty, Elo-style'],
   ['Warnings', '−15 rating each; leaving ends the game (−50)'],
 ];
 

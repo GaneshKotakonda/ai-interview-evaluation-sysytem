@@ -104,7 +104,7 @@ export default function ArenaResults() {
         <Panel i={2} className="p-6 sm:p-7">
           <SectionTitle
             title="Rating"
-            description="LeetCode-style rating: your score compared with the difficulty you reached, minus integrity penalties."
+            description="Elo-style rating: your score compared with the difficulty you reached, minus integrity penalties."
             action={<Link to="/arena/leaderboard" className="text-[13px] text-ink-2 underline decoration-line-strong underline-offset-4 hover:text-ink">Leaderboard</Link>}
           />
           <ul className="mt-5 grid gap-4 sm:grid-cols-2">

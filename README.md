@@ -18,7 +18,7 @@ MAESTRO is an interview-coaching platform that evaluates each response before ch
 - **Camera Engagement per Answer:** MediaPipe face presence, screen gaze and head alignment, blended into one score and recorded for every answer.
 - **Explainable Scoring v2:** The report shows each component, the four criteria, delivery and camera summaries, and the exact weights used.
 - **Answer Playback & Resume:** Owners can replay recordings from the report; a reload mid-interview resumes where it stopped.
-- **Ranked Interview Arena:** Game mode with XP, streaks, one hint, levels, coding challenges and a Boss Round, proctored like an interview. A LeetCode-style rating (start 1500) gives an overall rank and a rank per category (Frontend, Backend, Java, SQL, DSA, …) on the leaderboard; integrity warnings and leaving the game cost rating points.
+- **Ranked Interview Arena:** Game mode with XP, streaks, one hint, levels, coding challenges and a Boss Round, proctored like an interview. An Elo-style rating (start 1500) gives an overall rank and a rank per category (Frontend, Backend, Java, SQL, DSA, …) on the leaderboard; integrity warnings and leaving the game cost rating points.
 - **Explainable Reports:** Shows the adaptive journey, answer-quality scores, and adaptation outcomes.
 - **Real Performance History:** PostgreSQL-backed dashboard and saved interview history.
 
@@ -178,7 +178,7 @@ backend/
   adaptive_service.py  adaptive state and persistence
   adaptive_questions.py question validation and offline fallback questions
   arena.py             deterministic Arena rules and the ranked finish
-  ranking.py           LeetCode-style ratings, ranks, leaderboard
+  ranking.py           Elo-style ratings, ranks, leaderboard
   coding.py            coding round: turns, problem choice, grading
   coding_bank.py       15 verified coding problems with test generators
   coding_ai.py         AI-generated problems, accepted only after validation

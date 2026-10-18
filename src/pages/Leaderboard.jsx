@@ -7,7 +7,7 @@ import {
 import { api } from '../services/api';
 
 // -------------------------------------------------------------
-// Arena leaderboard: overall and per-category ranking (LeetCode-style
+// Arena leaderboard: overall and per-category ranking (Elo-style
 // ratings). Names are profile names; emails are never shown.
 // -------------------------------------------------------------
 export default function Leaderboard() {
