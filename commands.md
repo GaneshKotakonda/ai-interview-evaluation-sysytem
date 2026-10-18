@@ -1,4 +1,4 @@
-# Run the AI Interview Evaluation System with Docker
+# Run MAESTRO with Docker
 
 Everything (website, API, database and the code runner) runs in Docker on your own computer. You do not need to install Python, Node.js or PostgreSQL.
 

@@ -1,6 +1,6 @@
 # Deployment Plan
 
-How and where to run the AI Interview Evaluation System in production. Status: **ready to deploy, not deployed yet.**
+How and where to run MAESTRO in production. Status: **ready to deploy, not deployed yet.**
 
 ## Release scope
 

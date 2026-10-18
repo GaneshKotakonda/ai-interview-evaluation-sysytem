@@ -1,4 +1,4 @@
-# IntervueAI Viva Questions
+# MAESTRO Viva Questions
 
 1. **What makes this more than a ChatGPT wrapper?** It keeps persistent adaptive state, uses rubric retrieval, evaluates each saved response, applies deterministic difficulty rules, limits follow-ups, supports observable camera signals, and has a separate Arena layer.
 2. **Why use RAG?** Retrieved rubric concepts ground evaluation in the issued question rather than relying only on a general model response.

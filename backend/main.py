@@ -1,4 +1,5 @@
-"""FastAPI entry point for the AI Interview Evaluation System.
+"""FastAPI entry point for MAESTRO (Multimodal Adaptive Evaluation & Scoring
+for Technical Recruitment & Orientation).
 
 Run from the repository root:
     python -m uvicorn main:app --app-dir backend --reload --port 8000
@@ -102,7 +103,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="AI Interview Evaluation API",
+    title="MAESTRO API",
     description="Adaptive question generation, RAG answer evaluation, and media storage",
     version="1.1.0",
     lifespan=lifespan,

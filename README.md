@@ -1,6 +1,6 @@
-# IntervueAI — Adaptive Multimodal AI Interview Coach
+# MAESTRO — Multimodal Adaptive Evaluation & Scoring for Technical Recruitment & Orientation
 
-IntervueAI is an interview-coaching platform that evaluates each response before choosing the next challenge. It provides a professional Standard Interview and a separate gamified Interview Arena. It is a practice and evaluation-support tool, not an automated hiring decision-maker.
+MAESTRO is an interview-coaching platform that evaluates each response before choosing the next challenge. It provides a professional Standard Interview and a separate gamified Interview Arena. It is a practice and evaluation-support tool, not an automated hiring decision-maker.
 
 ## Key Features
 

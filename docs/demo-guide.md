@@ -1,4 +1,4 @@
-# IntervueAI Faculty Demo Guide (5–8 minutes)
+# MAESTRO Faculty Demo Guide (5–8 minutes)
 
 1. **Dashboard (30 seconds):** Log in and point out the separate Standard Interview and Interview Arena cards. Explain that history is PostgreSQL-backed and stays empty until a real session is completed.
 2. **Standard Interview (2.5 minutes):** On Readiness choose a role, show the mic level meter and room-noise check, click **Test speakers** (Piper voice), keep **Speak** selected and continue. Click **Start Interview**: the interviewer introduces itself and reads question 1 aloud. Answer out loud; point out the live mic bars, then stop talking to show the "Moving on in 3…" countdown (or click **Next Question**). While it shows "Thinking…", explain the silent pipeline: Whisper transcript → Gemini four-criteria grade → adaptive next question. Give one strong and one partial answer to show difficulty rising and a follow-up.

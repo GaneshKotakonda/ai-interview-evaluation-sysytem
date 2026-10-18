@@ -18,14 +18,18 @@ export function BrandMark({ className = 'h-8 w-8' }) {
   );
 }
 
-export function Brand({ compact = false }) {
+export const PRODUCT_NAME = 'MAESTRO';
+export const PRODUCT_FULL_NAME = 'Multimodal Adaptive Evaluation & Scoring for Technical Recruitment & Orientation';
+
+// full: spell out the name (sign-in screens). The narrow sidebar shows a short line.
+export function Brand({ compact = false, full = false }) {
   return (
     <div className="flex items-center gap-2.5">
       <BrandMark />
       {!compact && (
-        <div className="leading-tight">
-          <p className="text-[13px] font-semibold tracking-tight text-ink">AI Interview</p>
-          <p className="text-[12px] text-ink-3">Evaluation System</p>
+        <div className="leading-tight" title={`${PRODUCT_NAME}: ${PRODUCT_FULL_NAME}`}>
+          <p className="text-[13px] font-semibold tracking-[0.08em] text-ink">{PRODUCT_NAME}</p>
+          <p className="text-[12px] text-ink-3">{full ? PRODUCT_FULL_NAME : 'Interview evaluation'}</p>
         </div>
       )}
     </div>

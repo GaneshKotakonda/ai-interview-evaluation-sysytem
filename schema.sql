@@ -1,4 +1,4 @@
--- AI Interview Evaluation System - PostgreSQL Schema
+-- MAESTRO (Multimodal Adaptive Evaluation & Scoring for Technical Recruitment & Orientation) - PostgreSQL Schema
 --
 -- Safe to re-run: every statement is additive or idempotent, so existing
 -- installations are migrated in place. Apply with:

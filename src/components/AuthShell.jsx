@@ -27,7 +27,7 @@ export default function AuthShell({ title, description, children, footer }) {
   return (
     <div className="grid min-h-screen bg-paper lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
       <section className="flex flex-col px-6 py-8 sm:px-12">
-        <Brand />
+        <Brand full />
         <div className="flex flex-1 items-center py-12">
           <div className="page-enter mx-auto w-full max-w-[380px]">
             <h1 className="font-serif text-[2.1rem] tracking-[-0.02em] leading-[1.05] text-ink">{title}</h1>
@@ -53,7 +53,7 @@ export default function AuthShell({ title, description, children, footer }) {
         <div className="relative max-w-lg">
           <div className="reveal rounded-panel border border-paper/15 bg-paper/[0.04] p-6 backdrop-blur-sm" style={{ '--i': 2 }}>
             <div className="flex items-center justify-between text-xs text-paper/55">
-              <span>Question 3 of 5 · Follow-up</span>
+              <span>Question 3 · Follow-up</span>
               <span className="flex items-center gap-2">
                 <span className="pulse-dot h-2 w-2 rounded-full bg-[#e0796d]" />
                 Recording
