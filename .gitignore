@@ -40,3 +40,11 @@ report_template.html
 *.pdf
 *.png
 
+# Downloaded Piper voices, identity models and synthesised speech cache
+backend/voices/
+backend/models/
+backend/tts_cache/
+
+# Vercel: CLI project link and the built website uploaded from deploy/home
+.vercel
+deploy/home/site/

@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Check, CheckCircle2, Clock3, LoaderCircle, Sparkles, AlertCircle } from 'lucide-react';
+import { ArrowRight, Check, Minus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import {
+  FlowSteps, Notice, Panel, SectionTitle, Spinner,
+} from '../components/ui';
 import { api } from '../services/api';
-import { STORAGE_KEYS, readInterviewJourney } from '../utils/interviewJourney';
+import { STORAGE_KEYS, clearInterviewProgress, readInterviewJourney } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // BLOCK 1: Utility Functions
@@ -23,6 +26,9 @@ export default function InterviewComplete() {
   // -------------------------------------------------------------
   const duration = Number(localStorage.getItem(STORAGE_KEYS.duration));
   const interviewId = localStorage.getItem(STORAGE_KEYS.interviewId);
+  const endedReason = localStorage.getItem(STORAGE_KEYS.endedEarly);
+  const endedEarly = Boolean(endedReason);
+  const endReason = endedReason === 'away' ? 'away' : 'violations';
 
   // Real camera measurements from the interview, or null when the vision
   // model never produced data (the report then omits camera engagement).
@@ -62,6 +68,8 @@ export default function InterviewComplete() {
           interviewId,
           visionMetrics || {},
           Number.isFinite(duration) && duration > 0 ? duration : 0,
+          // Proctoring ended the interview: unanswered questions score 0.
+          ...(endedEarly ? [true, endReason] : []),
         );
 
         if (!isMounted) return;
@@ -88,162 +96,166 @@ export default function InterviewComplete() {
   }, [duration, interviewId, attempt]);
 
   // -------------------------------------------------------------
-  // BLOCK 4: Dynamic Analysis Checklist Items
+  // BLOCK 4: What was actually measured
   // -------------------------------------------------------------
-  const totalFillers = evaluationReport?.nlp_metrics?.total_fillers ?? 0;
+  // Each row is driven by the report data: "done" (with the real result),
+  // "skipped" (with the reason) or still running. Nothing is ticked just
+  // because loading finished.
+  const report = evaluationReport;
+  const answered = report?.completion?.answered ?? journey.length;
+  const total = report?.completion?.total;
+  // The interview stopped before any answer: nothing was graded (no score).
+  const notScored = report?.scored === false;
   const eyeContactVal = visionMetrics?.eyeContact;
+  const wpm = report?.speech_metrics?.words_per_minute;
+  const status = (done, doneText, skippedText) => (
+    evaluating || !report
+      ? { kind: 'pending', text: 'Working…' }
+      : done ? { kind: 'done', text: doneText } : { kind: 'skipped', text: skippedText }
+  );
 
   const analysisItems = [
     {
-      label: 'Speech & Text Alignment',
-      state: evaluating
-        ? 'Collecting saved answer evaluations...'
-        : 'Completed · Rubric cosine similarity matched',
-      complete: !evaluating && !evaluationError,
+      label: 'Answers graded',
+      ...status(answered > 0,
+        `${answered}${total ? ` of ${total}` : ''} ${answered === 1 ? 'answer' : 'answers'} graded against the role’s rubric`,
+        'No answers to grade'),
     },
     {
-      label: 'RAG Answer Evaluation',
-      state: evaluating
-        ? 'Aggregating saved technical scores...'
-        : 'Completed · Multi-criteria scores computed',
-      complete: !evaluating && !evaluationError,
+      label: 'Answer criteria',
+      ...status(Boolean(report?.criteria_scores),
+        'Correctness, completeness, depth and relevance scored', 'Not scored: no answers'),
     },
     {
-      label: 'Communication Analysis',
-      state: evaluating
-        ? 'Combining saved communication metrics...'
-        : `Completed · ${totalFillers} filler words analyzed`,
-      complete: !evaluating && !evaluationError,
+      label: 'Speaking',
+      ...status(answered > 0,
+        wpm ? `${wpm} words/min · ${report.speech_metrics.fillers_per_minute} fillers/min`
+          : `${report?.nlp_metrics?.total_fillers ?? 0} filler words found`,
+        'No spoken answers'),
     },
     {
-      label: 'Camera Engagement',
-      state: Number.isFinite(eyeContactVal)
-        ? `Approximate screen gaze: ${eyeContactVal}%`
-        : 'Not measured · camera analysis was unavailable',
-      complete: true,
+      label: 'Camera presence',
+      ...status(Number.isFinite(eyeContactVal), `Approximate screen gaze: ${eyeContactVal}%`, 'Not measured'),
     },
   ];
+  const penalised = Boolean(report?.integrity?.answers_zeroed || report?.integrity?.answers_capped);
 
   // -------------------------------------------------------------
   // BLOCK 5: Render Submission Confirmation & AI Status View
   // -------------------------------------------------------------
+  const answeredText = answered === 0 ? 'None' : `${answered} ${answered === 1 ? 'question' : 'questions'}`;
+  const facts = [
+    ['Questions answered', answeredText],
+    ['Duration', formatDuration(duration)],
+    ['Evaluation', evaluating ? 'Grading…' : evaluationError ? 'Report pending' : notScored ? 'Not scored' : 'Evaluated'],
+  ];
+  const reasonText = endReason === 'away' ? 'You stayed outside the interview for too long.' : 'The interview ended after repeated integrity warnings.';
+  const title = !endedEarly ? 'Interview complete'
+    : notScored ? 'Interview stopped before the first answer' : 'Interview ended early';
+  const startAgain = () => {
+    clearInterviewProgress();
+    navigate('/readiness');
+  };
+
   return (
-    <div className="mx-auto max-w-4xl py-3 sm:py-8">
-      <section className="card overflow-hidden">
-        {/* Header Summary Banner */}
-        <div className="border-b border-slate-100 p-6 text-center sm:p-10">
-          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-emerald-50 text-emerald-600">
-            <CheckCircle2 className="h-9 w-9" />
-          </div>
-          <p className="mt-6 text-sm font-semibold uppercase tracking-[0.16em] text-tealish-600">
-            Submission Complete
+    <div className="mx-auto max-w-3xl space-y-8">
+      <FlowSteps current={2} />
+
+      <Panel className="overflow-hidden">
+        <div className="px-6 pb-8 pt-10 text-center sm:px-10">
+          {/* Drawn check mark */}
+          <svg viewBox="0 0 64 64" className="mx-auto h-16 w-16" aria-hidden="true">
+            <circle cx="32" cy="32" r="29" fill="none" stroke="#171611" strokeWidth="2" pathLength="100" className="draw" style={{ '--len': 100 }} />
+            {endedEarly
+              ? <path d="M22 32 h20" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />
+              : <path d="M20 33 l8 8 l16 -17" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />}
+          </svg>
+          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>{title}</h1>
+          <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
+            {!endedEarly
+              ? 'Your answers and recordings are saved. We are combining every turn into your final report.'
+              : notScored
+                ? `${reasonText} Nothing was graded, so this interview has no score and does not count towards your averages.`
+                : `${reasonText} Your answers so far are saved; unanswered questions score 0.`}
           </p>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
-            Interview Completed!
-          </h1>
-          <p className="mx-auto mt-3 max-w-xl text-slate-500">
-            Your responses and submitted media have been saved for this interview.
-          </p>
 
-          <div className="mx-auto mt-8 grid max-w-2xl gap-3 sm:grid-cols-3">
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">Questions Answered</p>
-              <p className="mt-1 text-lg font-bold text-slate-900">{journey.length} {journey.length === 1 ? 'Question' : 'Questions'}</p>
-            </div>
-            <div className="rounded-xl bg-slate-50 p-4">
-              <Clock3 className="mx-auto h-4 w-4 text-navy-700" />
-              <p className="mt-2 text-xs text-slate-500">Interview Duration</p>
-              <p className="mt-1 font-bold text-slate-900">{formatDuration(duration)}</p>
-            </div>
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">Evaluation Status</p>
-              <p className="mt-1 inline-flex items-center gap-1.5 font-bold text-emerald-700">
-                {evaluating ? (
-                  <>
-                    <LoaderCircle className="h-4 w-4 animate-spin text-tealish-600" />
-                    Grading
-                  </>
-                ) : evaluationError ? 'Report pending' : (
-                  <>
-                    <Check className="h-4 w-4" />
-                    Evaluated
-                  </>
-                )}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* AI Analysis Multi-Phase Checklist */}
-        <div className="p-6 sm:p-8">
-          <div className="flex items-center gap-3">
-            <div className="rounded-xl bg-navy-50 p-2.5 text-navy-700">
-              <Sparkles className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="font-bold text-slate-900">Live AI Evaluation Processing</h2>
-              <p className="text-sm text-slate-500">
-                {evaluating
-                  ? 'Combining saved answer evaluations and camera metrics into your final report.'
-                  : evaluationError ? 'Report generation needs a retry.' : 'Your final report is ready.'}
-              </p>
-            </div>
-          </div>
-
-          {evaluationError && (
-            <div className="mt-4 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-              <AlertCircle className="h-5 w-5 shrink-0" />
-              <p>{evaluationError}</p>
-            </div>
-          )}
-
-          <div className="mt-6 grid gap-3 sm:grid-cols-2">
-            {analysisItems.map((item) => (
-              <div
-                key={item.label}
-                className="flex items-center gap-3 rounded-xl border border-slate-200 p-4"
-              >
-                <div
-                  className={`grid h-9 w-9 place-items-center rounded-full ${
-                    item.complete ? 'bg-emerald-50 text-emerald-600' : 'bg-navy-50 text-navy-700'
-                  }`}
-                >
-                  {item.complete ? (
-                    <Check className="h-4 w-4" />
-                  ) : (
-                    <LoaderCircle className="h-4 w-4 animate-spin text-tealish-600" />
-                  )}
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-slate-800">{item.label}</p>
-                  <p className={`text-xs ${item.complete ? 'text-emerald-600' : 'text-navy-600'}`}>
-                    {evaluationError && !item.complete ? 'Waiting for report generation' : item.state}
-                  </p>
-                </div>
+          <dl className="reveal mx-auto mt-8 grid max-w-xl grid-cols-3 divide-x divide-line rounded-control border border-line" style={{ '--i': 4 }}>
+            {facts.map(([label, value]) => (
+              <div key={label} className="px-3 py-4">
+                <dt className="text-xs text-ink-3">{label}</dt>
+                <dd className="mt-1 text-sm font-medium text-ink">{value}</dd>
               </div>
             ))}
-          </div>
+          </dl>
+        </div>
 
-          {evaluationError && interviewId && <button className="secondary-btn mt-6" disabled={evaluating} onClick={() => setAttempt((value) => value + 1)}>Retry Report Generation</button>}
+        <div className="border-t border-line bg-paper/60 px-6 py-6 sm:px-10">
+          <SectionTitle
+            title={notScored ? 'What was recorded' : 'Building your report'}
+            description={evaluating
+              ? 'Combining saved answer evaluations and camera metrics.'
+              : evaluationError ? 'Report generation needs a retry.'
+                : notScored ? 'The report lists the integrity events that stopped the interview.' : 'Your final report is ready.'}
+          />
 
-          {/* Navigation to Full Performance Report */}
-          <div className="mt-8 flex justify-center">
-            <button
-              onClick={() => navigate('/report')}
-              disabled={evaluating || !evaluationReport}
-              className="primary-btn"
-            >
-              {evaluating ? (
-                <>
-                  <LoaderCircle className="h-4 w-4 animate-spin" /> Finalizing AI Report...
-                </>
-              ) : (
-                'View Evaluation Report'
-              )}
-            </button>
+          {evaluationError && <Notice tone="warn" className="mt-4">{evaluationError}</Notice>}
+          {evaluationReport?.integrity?.verdict === 'invalid' && (
+            <Notice tone="bad" className="mt-4">
+              This interview is invalid: the candidate&apos;s identity could not be confirmed throughout, so it scores 0. The report shows the evidence.
+            </Notice>
+          )}
+          {evaluationReport?.integrity?.verdict === 'review' && (
+            <Notice tone="warn" className="mt-4">
+              {penalised
+                ? 'Integrity issues were found and some answers were penalised. The report’s Integrity section explains why.'
+                : 'Integrity issues were found. The report’s Integrity section explains them.'}
+            </Notice>
+          )}
+
+          {!notScored && (
+            <ol className="mt-5 space-y-1">
+              {analysisItems.map((item, index) => (
+                <li key={item.label} className="reveal flex items-center gap-3 py-2" style={{ '--i': index + 5 }}>
+                  <span
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border transition duration-300 ${
+                      item.kind === 'done' ? 'border-ink bg-ink text-paper' : 'border-line-strong text-ink-2'
+                    }`}
+                  >
+                    {item.kind === 'done' && <Check key="done" className="scale-in h-3.5 w-3.5" strokeWidth={2.5} aria-hidden="true" />}
+                    {item.kind === 'skipped' && <Minus className="h-3.5 w-3.5" aria-hidden="true" />}
+                    {item.kind === 'pending' && <Spinner className="h-3.5 w-3.5" />}
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm text-ink">{item.label}</span>
+                  <span className="text-right text-xs text-ink-2">
+                    {evaluationError && item.kind === 'pending' ? 'Waiting for report generation' : item.text}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+
+          <div className="mt-7 flex flex-wrap items-center justify-between gap-3">
+            {evaluationError && interviewId ? (
+              <button className="secondary-btn" disabled={evaluating} onClick={() => setAttempt((value) => value + 1)}>
+                Retry Report Generation
+              </button>
+            ) : notScored ? (
+              <button className="secondary-btn" onClick={() => navigate('/report')}>View Details</button>
+            ) : <span />}
+            {notScored ? (
+              <button onClick={startAgain} className="primary-btn">Start Again <ArrowRight className="h-4 w-4" /></button>
+            ) : (
+              <button
+                onClick={() => navigate('/report')}
+                disabled={evaluating || !evaluationReport}
+                className="primary-btn"
+              >
+                {evaluating ? <><Spinner /> Finalizing AI Report…</> : <>View Evaluation Report <ArrowRight className="h-4 w-4" /></>}
+              </button>
+            )}
           </div>
         </div>
-      </section>
+      </Panel>
     </div>
   );
 }

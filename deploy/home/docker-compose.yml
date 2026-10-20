@@ -1,0 +1,97 @@
+# Backend on your own computer, website on Vercel.
+#   API + PostgreSQL + code runner run here in Docker; a Cloudflare quick
+#   tunnel gives the API a public HTTPS address (https://<random>.trycloudflare.com)
+#   without opening router ports. The database is never reachable from outside.
+# Run from this folder:  ./start.sh   (see docs/DEPLOY_VERCEL_HOME.md)
+name: interview-home
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: interviews
+      POSTGRES_USER: interview
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/home/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Applied automatically on the first start (empty database).
+      - ../../schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interview -d interviews"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      args:
+        STT_MODEL: ${STT_MODEL:-base.en}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://interview:${POSTGRES_PASSWORD}@db:5432/interviews
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      COUNTER_CHEATING_ENABLED: ${COUNTER_CHEATING_ENABLED:-true}
+      COUNTER_CHEATING_THRESHOLD: ${COUNTER_CHEATING_THRESHOLD:-60}
+      COUNTER_CHEATING_MAX_CHALLENGES: ${COUNTER_CHEATING_MAX_CHALLENGES:-2}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-ai-evaluation-40c8a}
+      # The Vercel website address(es) allowed to call this API.
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS in deploy/home/.env to your Vercel address}
+      STT_MODEL: ${STT_MODEL:-base.en}
+      # The only account allowed to open the usage overview (both must match).
+      ADMIN_UID: ${ADMIN_UID:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      CODE_RUNNER_URL: http://runner:8080
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in deploy/home/.env}
+    networks: [default, runner]
+    volumes:
+      - uploads:/app/backend/uploads
+      - tts_cache:/app/backend/tts_cache
+    # Only this computer can reach it directly (for checks); the public
+    # address is the tunnel.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+
+  # Candidates' code runs here, isolated from the API: no internet, read-only
+  # filesystem, no extra Linux capabilities, CPU/memory/process limits.
+  runner:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.runner
+    restart: unless-stopped
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN}
+    networks: [runner]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,exec
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    expose:
+      - "8080"
+
+  # Public HTTPS address for the API. A quick tunnel needs no Cloudflare
+  # account; its address changes every time this container restarts.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - api
+    command: tunnel --no-autoupdate --url http://api:8000
+
+networks:
+  runner:
+    internal: true   # no route to the internet
+
+volumes:
+  pgdata:
+  uploads:
+  tts_cache:

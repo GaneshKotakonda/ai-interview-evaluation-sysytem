@@ -6,7 +6,7 @@ import arena
 import adaptive_service
 import gemini_service
 from adaptive_questions import validate_question
-from test_adaptive import interview, response, TurnCursor
+from test_adaptive import TEST_USER, interview, response, TurnCursor
 
 
 class ArenaRulesTests(unittest.TestCase):
@@ -124,7 +124,10 @@ class ArenaPersistenceTests(unittest.TestCase):
         state = self.game(6)
         answer = {**response(6, score=88), 'difficulty': 'expert'}
         cursor = ArenaCursor(state, answer)
-        result = adaptive_service.advance(cursor, state)
+        # The ranked finish (integrity + rating) is covered in test_ranking.py.
+        with patch.object(arena, 'finalize', return_value={'ratings': {}}) as finalize:
+            result = adaptive_service.advance(cursor, state)
+        finalize.assert_called_once()
         self.assertEqual(state['status'], 'completed')
         self.assertTrue(result['is_complete'])
         self.assertEqual(result['game']['boss_score'], 88)
@@ -153,7 +156,8 @@ class ArenaPersistenceTests(unittest.TestCase):
         state = {**self.game(6), 'status': 'completed'}
         cursor = ArenaCursor(state, response(6))
         cursor.stats.update(total_xp=640, best_streak=4, highest_difficulty='expert', boss_score=88)
-        cursor.fetchall = lambda: [dict(question_index=1, topic='API', answer_quality_score=90, feedback='Clear reasoning'), dict(question_index=6, topic='Concurrency', answer_quality_score=60, feedback='Discuss races')]
+        turns = [dict(question_index=1, topic='API', answer_quality_score=90, feedback='Clear reasoning'), dict(question_index=6, topic='Concurrency', answer_quality_score=60, feedback='Discuss races')]
+        cursor.fetchall = lambda: turns if 'arena_turns' in cursor.query else []
         result = arena.results(cursor, state)
         self.assertEqual(result['average_score'], 75)
         self.assertEqual(result['total_xp'], 640)
@@ -168,7 +172,7 @@ class ArenaPersistenceTests(unittest.TestCase):
         cursor = ArenaCursor(state, response(6))
         with patch.object(main.database, 'get_db_connection', return_value=FakeConnection(cursor)):
             with self.assertRaises(HTTPException) as caught:
-                main.complete_and_evaluate_interview(state['id'], main.EvaluateInterviewRequest())
+                main.complete_and_evaluate_interview(state['id'], main.EvaluateInterviewRequest(), user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 409)
         self.assertIn('Arena', caught.exception.detail)
 
@@ -179,7 +183,7 @@ class ArenaPersistenceTests(unittest.TestCase):
         conn = FakeConnection(ArenaCursor(state, response(6)))
         with patch.object(main.database, 'get_db_connection', return_value=conn), patch.object(arena, 'award', side_effect=RuntimeError('storage unavailable')):
             with self.assertRaises(HTTPException) as caught:
-                main.next_question(state['id'])
+                main.next_question(state['id'], user=TEST_USER)
         self.assertEqual(caught.exception.status_code, 500)
         self.assertTrue(conn.rolled_back)
         self.assertFalse(conn.committed)

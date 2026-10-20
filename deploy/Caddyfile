@@ -1,0 +1,24 @@
+# Caddy obtains and renews the HTTPS certificate for API_DOMAIN itself.
+{$API_DOMAIN} {
+	encode gzip
+
+	# Answer recordings can be large (MAX_UPLOAD_MB on the API).
+	request_body {
+		max_size 250MB
+	}
+
+	reverse_proxy api:8000 {
+		# Whisper + Gemini grading can take a while on long answers.
+		transport http {
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

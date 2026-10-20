@@ -1,13 +1,20 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import {
+  EmailAuthProvider,
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
   updateProfile,
 } from 'firebase/auth';
 import { auth } from '../firebase';
+import { setAuthTokenProvider } from '../services/api';
+
+// Attach the signed-in user's ID token to every backend request.
+setAuthTokenProvider(() => (auth.currentUser ? auth.currentUser.getIdToken() : null));
 
 // -------------------------------------------------------------
 // Firebase authentication state shared through React context.
@@ -44,9 +51,31 @@ export function AuthProvider({ children }) {
   const resetPassword = (email) => sendPasswordResetEmail(auth, email);
   const logout = () => signOut(auth);
 
+  // Firebase mutates the same User object in place, so bump a counter to
+  // give consumers a new context value after a profile change.
+  const [profileVersion, setProfileVersion] = useState(0);
+
+  const updateDisplayName = async (fullName) => {
+    await updateProfile(auth.currentUser, { displayName: fullName });
+    await auth.currentUser.reload();
+    setUser(auth.currentUser);
+    setProfileVersion((version) => version + 1);
+  };
+
+  // Firebase requires a recent sign-in before a password change, so confirm
+  // the current password first.
+  const changePassword = async (currentPassword, newPassword) => {
+    const current = auth.currentUser;
+    const credential = EmailAuthProvider.credential(current.email, currentPassword);
+    await reauthenticateWithCredential(current, credential);
+    await updatePassword(current, newPassword);
+  };
+
   const value = useMemo(
-    () => ({ user, loading, signup, login, resetPassword, logout }),
-    [user, loading],
+    () => ({
+      user, loading, profileVersion, signup, login, resetPassword, logout, updateDisplayName, changePassword,
+    }),
+    [user, loading, profileVersion],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

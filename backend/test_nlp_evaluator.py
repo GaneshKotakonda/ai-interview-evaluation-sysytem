@@ -6,8 +6,8 @@ import os
 import sys
 import pytest
 
-# Add project backend directory to Python path
-PROJECT_BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend")
+# This file lives in backend/, next to the module under test
+PROJECT_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_BACKEND_DIR not in sys.path:
     sys.path.insert(0, PROJECT_BACKEND_DIR)
 
@@ -90,3 +90,27 @@ def test_tc_py_02_candidate_2024BCS0113_negative_invalid_inputs():
     print(f"[TC-PY-02] Empty Vector Fallback -> rubrics={rubrics}, similarity={max_sim}")
     assert rubrics == []
     assert max_sim == 0.0
+
+
+# ---------------------------------------------------------------
+# Non-answer detection
+# ---------------------------------------------------------------
+from nlp_evaluator import is_non_answer
+
+
+@pytest.mark.parametrize("text", [
+    "skip", "Skip.", " I don't know ", "I dont know!", "idk", "next question",
+    "", None, "   ", "um uh", "I don’t know",
+])
+def test_non_answers_are_detected(text):
+    assert is_non_answer(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "I don't know the exact method, but I would solve it using a hash map...",
+    "no, because the index is shared between threads",
+    "pass by reference means the callee sees the same object",
+    "A stack is a LIFO structure",
+])
+def test_real_answers_are_not_non_answers(text):
+    assert is_non_answer(text) is False

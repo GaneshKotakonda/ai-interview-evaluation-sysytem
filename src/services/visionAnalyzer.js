@@ -3,7 +3,10 @@
 // The model and WASM runtime load from a CDN on first use (GPU delegate,
 // falling back to CPU). All outputs are coarse, observable signals — face
 // present, approximate gaze, head alignment — not identity or emotion.
+// For integrity checks each frame also carries the iris position across
+// the eye (reading detection) and the lip gap (lip movement while speaking).
 // -------------------------------------------------------------
+import { gazeHorizontal, mouthOpenness } from './malpracticeSignals';
 
 const VISION_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
@@ -139,6 +142,8 @@ export function analyzeFaceResult(result) {
       eyeContact: false,
       headCentered: false,
       expression: 'no-face',
+      gazeX: null,
+      mouth: null,
     };
   }
 
@@ -153,6 +158,8 @@ export function analyzeFaceResult(result) {
     eyeContact: estimateEyeContact(primaryLandmarks, scores),
     headCentered: head.centered,
     expression: classifyExpression(scores),
+    gazeX: gazeHorizontal(primaryLandmarks),
+    mouth: mouthOpenness(primaryLandmarks),
   };
 }
 

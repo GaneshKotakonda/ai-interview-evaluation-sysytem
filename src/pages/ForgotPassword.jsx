@@ -1,7 +1,9 @@
 import { useState } from 'react';
+import { ArrowLeft } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { LoaderCircle, Mic } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import AuthShell from '../components/AuthShell';
+import { Notice, Spinner } from '../components/ui';
 
 // -------------------------------------------------------------
 // Password reset. The success message is shown even for unknown emails so
@@ -43,71 +45,39 @@ export default function ForgotPassword() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 px-5 py-10 sm:px-8">
-      <div className="mx-auto w-full max-w-md">
-        <div className="mb-7 flex items-center justify-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-navy-900 text-white">
-            <Mic className="h-5 w-5" />
-          </div>
-          <div>
-            <p className="font-bold text-navy-900">AI Interview Evaluation System</p>
-            <p className="text-sm text-slate-500">Account Recovery</p>
-          </div>
+    <AuthShell
+      title="Reset your password"
+      description="Enter your account email and we will send you a link to choose a new password."
+      footer={(
+        <Link to="/login" className="inline-flex items-center gap-1.5 text-ink-2 transition hover:text-ink">
+          <ArrowLeft className="h-4 w-4" /> Back to sign in
+        </Link>
+      )}
+    >
+      {success && (
+        <Notice tone="ok" className="mb-5">
+          If an account exists for that email, a password reset link has been sent.
+        </Notice>
+      )}
+      {error && <Notice tone="bad" className="mb-5">{error}</Notice>}
+      <form className="space-y-5" onSubmit={handleSubmit}>
+        <div>
+          <label htmlFor="reset-email" className="field-label">Email</label>
+          <input
+            id="reset-email"
+            type="email"
+            className="input-field"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+            autoComplete="email"
+          />
         </div>
-
-        <div className="card p-6 sm:p-8">
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">Reset your password</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            Enter your account email and we’ll send you a password reset link.
-          </p>
-
-          {success && (
-            <div
-              role="status"
-              className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700"
-            >
-              If an account exists for that email, a password reset link has been sent.
-            </div>
-          )}
-          {error && (
-            <div
-              role="alert"
-              className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"
-            >
-              {error}
-            </div>
-          )}
-          <form className="mt-6 space-y-5" onSubmit={handleSubmit}>
-            <div>
-              <label htmlFor="reset-email" className="mb-2 block text-sm font-medium text-slate-700">
-                Email
-              </label>
-              <input
-                id="reset-email"
-                type="email"
-                className="input-field"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-                autoComplete="email"
-              />
-            </div>
-
-            <button className="primary-btn w-full" disabled={submitting}>
-              {submitting && <LoaderCircle className="h-4 w-4 animate-spin" />}
-              {submitting ? 'Sending...' : 'Send Reset Link'}
-            </button>
-          </form>
-
-          <p className="mt-6 text-center text-sm text-slate-500">
-            Remembered your password?{' '}
-            <Link to="/login" className="font-semibold text-navy-700 hover:text-navy-900">
-              Back to sign in
-            </Link>
-          </p>
-        </div>
-      </div>
-    </div>
+        <button className="primary-btn w-full !py-3" disabled={submitting}>
+          {submitting ? <><Spinner /> Sending…</> : 'Send Reset Link'}
+        </button>
+      </form>
+    </AuthShell>
   );
 }
