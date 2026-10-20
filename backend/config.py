@@ -127,6 +127,11 @@ COUNTER_CHEATING_MAX_CHALLENGES = max(0, min(2, _env_int("COUNTER_CHEATING_MAX_C
 CODE_RUNNER_URL = _env_str("CODE_RUNNER_URL")
 RUNNER_TOKEN = _env_str("RUNNER_TOKEN")
 CODE_TIME_LIMIT_SECONDS = float(_env_str("CODE_TIME_LIMIT_SECONDS", "2"))
+# Set only inside the dedicated runner container (deploy/Dockerfile.runner):
+# one program at a time, every leftover process of the runner user killed
+# and /tmp emptied after each run (code_runner.py). Never on a developer
+# machine, where the sweep would hit the developer's own processes.
+RUNNER_ISOLATE = _env_bool("RUNNER_ISOLATE", False)
 
 # The one owner who may open the usage overview (admin.py). Set both in the
 # server's private .env only; if either is empty, nobody has access.

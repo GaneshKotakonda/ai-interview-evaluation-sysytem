@@ -3,15 +3,18 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useIntegrityGuard } from './useIntegrityGuard';
 
-const { api, captureFrame, exitFullscreen } = vi.hoisted(() => ({
+const { api, captureFrame, exitFullscreen, proctor } = vi.hoisted(() => ({
   api: { reportProctoringEvents: vi.fn(), identitySnapshot: vi.fn() },
-  captureFrame: vi.fn(), exitFullscreen: vi.fn(),
+  captureFrame: vi.fn(), exitFullscreen: vi.fn(), proctor: { callbacks: null },
 }));
 vi.mock('../services/api', () => ({ api }));
 vi.mock('../services/cameraSnapshot', () => ({ captureFrame }));
 vi.mock('../services/proctoring', () => ({
   enterFullscreen: async () => true, exitFullscreen,
-  startProctoring: () => ({ stop: vi.fn(), isAway: () => false }),
+  startProctoring: (callbacks) => {
+    proctor.callbacks = callbacks;
+    return { stop: vi.fn(), isAway: () => false, isOutside: () => true, check: vi.fn() };
+  },
 }));
 vi.mock('../services/sceneMonitor', () => ({ startSceneMonitor: () => ({ stop: vi.fn() }) }));
 
@@ -196,3 +199,51 @@ it('counts one background voice once, as "another voice" or as background noise'
 async function waitForQueue() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
+
+const leave = (id) => ({ id, type: 'fullscreen_exit', types: new Set(['fullscreen_exit']), question_index: null });
+const sentEvents = () => api.reportProctoringEvents.mock.calls.flatMap(([, events]) => events);
+
+it('grace period: leaving before Question 1 is asked back, recorded and never counted', async () => {
+  const onTerminate = vi.fn();
+  const { result } = setup({ countFromFirstQuestion: true, onTerminate });
+  await act(async () => { await result.current.start(); });
+  expect(result.current.counting).toBe(false);
+  for (const id of ['a', 'b', 'c', 'd']) {
+    act(() => proctor.callbacks.onLeave(leave(id)));
+    expect(result.current.away).not.toBeNull();
+    act(() => proctor.callbacks.onReturn({ ...leave(id), types: ['fullscreen_exit'], duration: 1.5 }));
+  }
+  expect(result.current.violations).toBe(0);
+  expect(result.current.awayLeft).toBeNull();
+  expect(onTerminate).not.toHaveBeenCalled();
+  await act(async () => { await result.current.flushEvents({ required: true }); });
+  expect(new Set(sentEvents().map((e) => e.type))).toEqual(new Set(['before_start']));
+
+  // From Question 1 on, leaving counts as before.
+  act(() => result.current.startCounting());
+  expect(result.current.counting).toBe(true);
+  act(() => proctor.callbacks.onLeave(leave('e')));
+  expect(result.current.violations).toBe(1);
+});
+
+it('grace period: problems seen before Question 1 are recorded as before_start, not counted', async () => {
+  const { result } = setup({ countFromFirstQuestion: true });
+  await act(async () => { await result.current.start(); });
+  act(() => result.current.handleEpisode('phone_detected', 'start'));
+  act(() => result.current.handleEpisode('phone_detected', 'end'));
+  expect(result.current.violations).toBe(0);
+  expect(result.current.warning).toBeNull();
+  await act(async () => { await result.current.flushEvents({ required: true }); });
+  expect(sentEvents().map((e) => [e.type, e.details?.type])).toEqual([['before_start', 'phone_detected'], ['before_start', 'phone_detected']]);
+  act(() => result.current.startCounting());
+  act(() => result.current.handleEpisode('phone_detected', 'start'));
+  expect(result.current.violations).toBe(1);
+});
+
+it('without the grace option, leaving counts from the start (unchanged)', async () => {
+  const { result } = setup();
+  await act(async () => { await result.current.start(); });
+  expect(result.current.counting).toBe(true);
+  act(() => proctor.callbacks.onLeave(leave('x')));
+  expect(result.current.violations).toBe(1);
+});

@@ -6,6 +6,9 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+# Isolate candidates from each other: one program at a time, leftovers of
+# the runner user killed and /tmp emptied after every run (code_runner.py).
+ENV RUNNER_ISOLATE=1
 
 # Compilers and runtimes for the supported languages.
 RUN apt-get update \

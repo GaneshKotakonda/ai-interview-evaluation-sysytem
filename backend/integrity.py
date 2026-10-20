@@ -32,7 +32,10 @@ MAJOR_EVENTS = LEAVE_EVENTS | MALPRACTICE_EVENTS | SERVER_EVENTS
 MINOR_EVENTS = {"paste_blocked", "copy_blocked", "context_menu", "devtools_shortcut",
                 "print_screen", "multiple_displays", "fullscreen_unavailable",
                 "book_detected", "virtual_device", "reading_pattern",
-                "looking_away"}
+                "looking_away",
+                # Left the page or flagged during setup and the rules, before
+                # Question 1 (the grace period): recorded, never counted.
+                "before_start"}
 EVENT_TYPES = MAJOR_EVENTS | MINOR_EVENTS
 CLIENT_EVENT_TYPES = EVENT_TYPES - SERVER_EVENTS
 
@@ -61,6 +64,7 @@ LABELS = {
     "virtual_device": "Virtual camera or microphone",
     "reading_pattern": "Eye movements like reading",
     "looking_away": "Looked away from the interview screen",
+    "before_start": "Before the first question (not counted)",
 }
 
 

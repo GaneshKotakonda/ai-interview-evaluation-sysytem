@@ -261,7 +261,7 @@ def test_verification_takes_coding_turn_and_coding_moves_to_next_turn(client, mo
     # its own, so the interview still has both coding questions.
     moved = advance(browser, iid, answer(browser, iid, 2))["next_question"]
     assert moved["index"] == 3 and moved["kind"] == "coding"
-    monkeypatch.setattr(main.code_runner, "run_tests", lambda *a: {
+    monkeypatch.setattr(main.code_runner, "run_tests", lambda *a, **k: {
         "compiled": True, "compile_output": "", "passed": 1, "total": 1,
         "results": [{"status": "passed", "time_ms": 1}]})
     monkeypatch.setattr(gemini_service, "review_code", lambda *a: None)
@@ -279,7 +279,7 @@ def test_coding_answer_challenge_uses_normal_submission_without_hidden_test_disc
     with connection() as conn, conn.cursor() as cur:
         cur.execute("UPDATE interview_questions SET coding_private=%s WHERE interview_id=%s AND question_index=2;",
                     (json.dumps({"source": "ai", "tests": [{"input": "HIDDEN_TEST_SENTINEL", "expected": "secret"}]}), iid))
-    monkeypatch.setattr(main.code_runner, "run_tests", lambda *a: {
+    monkeypatch.setattr(main.code_runner, "run_tests", lambda *a, **k: {
         "compiled": True, "compile_output": "", "passed": 1, "total": 1,
         "results": [{"status": "passed", "time_ms": 1}]})
     monkeypatch.setattr(gemini_service, "review_code", lambda *a: None)

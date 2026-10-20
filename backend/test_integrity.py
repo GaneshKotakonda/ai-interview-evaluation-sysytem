@@ -103,12 +103,38 @@ class EarlyTerminationTests(unittest.TestCase):
         update = next(c for c in cursor.calls if "UPDATE interviews" in c[0])
         self.assertEqual(update[1][2:4], (True, "violations"))
 
-    def test_ending_before_any_answer_still_produces_a_report(self):
-        result, _ = self._complete([])
-        self.assertEqual(result["overall_score"], 0)
-        speech = next(s for s in result["scores"] if s["label"] == "Speech Fluency")
-        self.assertIsNone(speech["value"])
+    def test_ending_before_any_answer_is_reported_but_not_scored(self):
+        result, cursor = self._complete([])
+        # Nothing was answered, so there is no score at all (not a 0 that
+        # would sit in the candidate's averages and trend).
+        self.assertIsNone(result["overall_score"])
+        self.assertFalse(result["scored"])
+        self.assertFalse(result["integrity"]["scored"])
+        self.assertEqual([s["label"] for s in result["scores"]], ["Speech Fluency"])
         self.assertTrue(result["insufficient_responses"])
+        self.assertIn("stopped before any question was answered", result["feedback"])
+        self.assertIn("not scored", result["feedback"])
+        self.assertEqual((result["strengths"], result["improvements"]), ([], []))
+        update = next(c for c in cursor.calls if "UPDATE interviews" in c[0])
+        self.assertIsNone(update[1][0])
+        report = next(c for c in cursor.calls if "INSERT INTO evaluation_reports" in c[0])
+        self.assertEqual(report[1][1:7], (None, None, None, None, None, None))
+
+    def test_finished_interview_with_every_question_skipped_still_scores_zero(self):
+        class Cursor(FakeCursor):
+            def fetchone(self):
+                if "SELECT * FROM interviews" in self.last_query:
+                    return dict(ACTIVE)
+                return super().fetchone()
+        skipped = [{"id": f"r{i}", "question_id": f"q{i}", "question_index": i, "question_text": "Q",
+                    "candidate_answer": "skip", "answer_quality_score": 0, "communication_score": 0,
+                    "evaluated_at": "now", "evaluation_source": "skipped", "criteria_scores": None,
+                    "strengths": [], "improvements": []} for i in range(1, 6)]
+        cursor = Cursor(responses=skipped)
+        with patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)):
+            result = main.complete_and_evaluate_interview(INTERVIEW_ID, main.EvaluateInterviewRequest(), user=USER)
+        self.assertEqual(result["overall_score"], 0)
+        self.assertTrue(result["scored"])
 
     def test_without_ended_early_all_turns_are_still_required(self):
         class Cursor(FakeCursor):

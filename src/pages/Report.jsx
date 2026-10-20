@@ -77,6 +77,7 @@ function OverallScore({ score }) {
         <span className="text-lg text-ink-3">/ 100</span>
       </div>
       {band && <p className="mt-3 font-serif text-2xl italic text-ink-2">{band.label}</p>}
+      {!hasScore && <p className="mt-3 text-sm text-ink-2">Not scored: the interview stopped before any answer.</p>}
 
       {hasScore && (
         <div className="mt-auto pt-8">

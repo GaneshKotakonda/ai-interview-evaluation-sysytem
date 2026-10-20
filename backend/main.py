@@ -338,6 +338,9 @@ def completion_response(report, comp=None):
         "verification": verification_report.counts((report.get("integrity") or {}).get("verification")),
         "completion": comp,
         "insufficient_responses": insufficient,
+        # False when the interview stopped before any answer (no score at
+        # all); reports saved before this flag existed were all scored.
+        "scored": (report.get("integrity") or {}).get("scored", True) is not False,
     }
 
 
@@ -411,7 +414,11 @@ def start_interview(payload: StartInterviewRequest, user: AuthUser = Depends(aut
             )
             user_id = str(cur.fetchone()["id"])
 
-        # Step B: Create the interview session.
+        # Step B: Create the interview session. One ranked game at a time:
+        # an unfinished earlier game is closed (and rated) first, so leaving
+        # a bad game and starting again is not a free retry.
+        if payload.interview_mode == "game":
+            arena.close_abandoned(cur, user_id)
         cur.execute(
             """
             INSERT INTO interviews (user_id, role_title, job_description, status, max_turns,
@@ -589,7 +596,10 @@ def transcribe_answer(
     try:
         result = stt_service.transcribe(path, content_type, context=question["question_text"])
     except stt_service.TranscriptionError as err:
-        raise HTTPException(422, str(err))
+        # The server could not transcribe (STT off or failing, recording too
+        # long): 503, so the browser keeps the recording and offers a retry.
+        # 422 is reserved for a recording with no speech in it.
+        raise HTTPException(503, str(err))
     if not result["text"].strip():
         raise HTTPException(422, "No speech was detected in the recording. Please try again.")
     metrics = speech_analysis.compute_metrics(result["words"], result["text"])
@@ -722,9 +732,14 @@ def arena_hint(interview_id: str, payload: HintRequest, user: AuthUser = Depends
 
 @app.get("/api/interviews/{interview_id}/arena-results")
 def arena_results(interview_id: str, user: AuthUser = Depends(auth.current_user)):
-    # Read-only: no row lock, so viewing results never blocks an active turn.
+    # No row lock on this game, so viewing results never blocks an active
+    # turn. A game left idle (e.g. the browser's end call failed) is closed
+    # first, so its results exist instead of a lasting "finish the Arena".
     with transaction("Could not load Arena results. Please retry.") as (_conn, cur):
         interview = owned_interview(cur, interview_id, user, lock=False)
+        if interview.get("interview_mode") == "game" and interview["status"] == "in_progress":
+            if arena.close_abandoned(cur, interview["user_id"], arena.ABANDONED_AFTER_MINUTES):
+                interview = owned_interview(cur, interview_id, user, lock=False)
         return arena.results(cur, interview)
 
 
@@ -970,6 +985,25 @@ def complete_and_evaluate_interview(
                 "Some answers showed signs of malpractice and were penalised; see the Integrity "
                 "section. " + summary_feedback
             )
+
+        # Stopped before any question was answered: there is nothing to
+        # grade, so the session gets no score at all. A 0 here would sit in
+        # the candidate's averages and trend as if they had been graded.
+        # (Skipping every question in a finished interview still scores 0.)
+        not_scored = ended_early and comp["answered"] == 0
+        if not_scored:
+            overall = answer_quality = communication = fluency = camera = None
+            criteria = None
+            weights = {}
+            top_strengths, top_improvements = [], []
+            reason = (f"you stayed outside it for more than {config.PROCTORING_MAX_AWAY_SECONDS} seconds"
+                      if payload.end_reason == "away" else "of repeated integrity warnings")
+            summary_feedback = (
+                f"This interview stopped before any question was answered, because {reason}. "
+                "It was not scored and does not count towards your averages. "
+                "The Integrity section shows what was recorded."
+            )
+        integrity_summary["scored"] = not not_scored
 
         # Step E: Persist the report and close the interview.
         cur.execute(
@@ -1678,6 +1712,8 @@ def arena_me(user: AuthUser = Depends(auth.current_user)):
         me = cur.fetchone()
         if not me:
             return {"ratings": [], "recent": []}
+        # Games left idle count before the ratings are shown.
+        arena.close_abandoned(cur, me["id"], arena.ABANDONED_AFTER_MINUTES)
         cur.execute("SELECT category, rating, games, best_rating FROM user_ratings WHERE user_id = %s;", (me["id"],))
         ratings = []
         for row in cur.fetchall():

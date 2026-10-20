@@ -102,6 +102,8 @@ export default function ArenaPlay() {
     videoRef,
     monitorRef,
     turnRef,
+    // Setup and the rules are a grace period: warnings count from level 1.
+    countFromFirstQuestion: true,
     context: () => ({ at: beganAtRef.current ? (Date.now() - beganAtRef.current) / 1000 : null }),
     onTerminate: async (reason) => {
       setPhase('terminated');
@@ -219,15 +221,26 @@ export default function ArenaPlay() {
     setVoice(value);
   }, []);
 
+  // Answer this level by typing: no recorder in this browser, or the server
+  // cannot transcribe right now. Typed answers get typing signals, so the
+  // server's pasted/auto-typed checks still run.
+  const switchToTyping = useCallback(() => {
+    recorderRef.current?.cancel?.();
+    recorderRef.current = null;
+    pendingAudioRef.current = null;
+    signalsRef.current = createAnswerSignals({ voiceMode: false, now: performance.now() });
+    setVoiceNotice('');
+    setTypedFallback(true);
+    setVoiceStage('idle');
+  }, [setVoiceStage]);
+
   // Start recording the spoken answer (after the question and the chime).
   const listenNow = useCallback(() => {
     if (!mountedRef.current || guard.isTerminated()) return;
     recorderRef.current?.cancel?.();
     recorderRef.current = streamRef.current ? startAnswerRecording(streamRef.current) : null;
     if (!recorderRef.current) {
-      // No microphone recorder in this browser: answer by typing instead.
-      setTypedFallback(true);
-      setVoiceStage('idle');
+      switchToTyping();
       return;
     }
     pendingAudioRef.current = null;
@@ -235,11 +248,12 @@ export default function ArenaPlay() {
     listenStartRef.current = performance.now();
     setListen({ level: 0, countdown: null, seconds: 0, noVoice: false });
     setVoiceStage('listening');
-  }, [guard, setVoiceStage]);
+  }, [guard, setVoiceStage, switchToTyping]);
 
   // The interviewer reads the level's question once; a newer level (or
   // leaving) cancels what is left of the previous one.
   const askLevel = useCallback(async (level) => {
+    guard.startCounting();
     const token = ++levelTokenRef.current;
     recorderRef.current?.cancel?.();
     recorderRef.current = null;
@@ -366,7 +380,7 @@ export default function ArenaPlay() {
         return;
       }
       setVoiceStage('transcribe-error');
-      setVoiceNotice('Your answer could not be processed. Check your connection and retry; your recording is kept.');
+      setVoiceNotice('Your answer could not be turned into text. Retry, or type your answer instead; your recording is kept until then.');
     }
   }
   finishRef.current = finishSpeaking;
@@ -395,8 +409,9 @@ export default function ArenaPlay() {
   }
 
   // Spend the single session hint on the current, unanswered level.
+  const hintAllowed = typedFallback || voice === 'speaking' || voice === 'listening';
   async function requestHint() {
-    if (busyRef.current || locked || game.remaining_hints === 0) return;
+    if (busyRef.current || locked || game.remaining_hints === 0 || !hintAllowed) return;
     busyRef.current = true;
     setPhase('hint');
     setError('');
@@ -667,7 +682,10 @@ export default function ArenaPlay() {
                         </button>
                       )}
                       {voice === 'transcribe-error' && (
-                        <button className="primary-btn" onClick={() => finishSpeaking()}>Retry</button>
+                        <>
+                          <button className="ghost-btn !py-2 text-[13px]" onClick={switchToTyping}>Type your answer instead</button>
+                          <button className="primary-btn" onClick={() => finishSpeaking()}>Retry</button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -707,7 +725,7 @@ export default function ArenaPlay() {
                 </>
               )}
               <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button className="secondary-btn !py-2" onClick={requestHint} disabled={locked || game.remaining_hints === 0}>
+                <button className="secondary-btn !py-2" onClick={requestHint} disabled={locked || game.remaining_hints === 0 || !hintAllowed}>
                   <Lightbulb aria-hidden="true" className="h-4 w-4" /> Use Hint
                 </button>
                 <span className="text-[13px] text-ink-2">{game.remaining_hints} {game.remaining_hints === 1 ? 'Hint' : 'Hints'}</span>

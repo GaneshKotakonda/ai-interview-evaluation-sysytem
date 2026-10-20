@@ -222,7 +222,7 @@ export default function Reports() {
           <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <Panel i={1} as="article" className="p-6 sm:p-7">
               <div className="flex items-start justify-between gap-4">
-                <SectionTitle title="Overall Score Trend" description={`${trendPoints.length} evaluated interviews`} />
+                <SectionTitle title="Overall Score Trend" description={`${trendPoints.length} evaluated ${trendPoints.length === 1 ? 'interview' : 'interviews'}`} />
                 <div className="text-right">
                   <p className="num font-serif text-4xl leading-none text-ink">
                     {hasValue(latest) ? <CountUp value={latest} /> : '—'}

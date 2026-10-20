@@ -282,3 +282,32 @@ it('ends the spoken answer after three seconds of silence, as in the Standard In
   expect(api.transcribeAnswer).toHaveBeenCalledTimes(1);
   expect(api.submitAnswer).toHaveBeenCalledTimes(1);
 });
+
+it('does not allow the hint while the spoken answer is being processed', async () => {
+  let finish;
+  api.transcribeAnswer.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  api.useHint.mockResolvedValue({ hint: 'A hint', remaining_hints: 0 });
+  await open(); await speakAnswer();
+  expect(await screen.findByText('Processing your answer…')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use Hint' })).toBeDisabled();
+  await act(async () => finish({ transcript: SPOKEN }));
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  expect(api.useHint).not.toHaveBeenCalled();
+  expect(api.submitAnswer).toHaveBeenCalledWith('arena-id', expect.objectContaining({ candidateAnswer: SPOKEN }));
+});
+
+it('offers typing when the server cannot transcribe, and sends typing signals', async () => {
+  api.transcribeAnswer.mockRejectedValueOnce(Object.assign(new Error('Speech-to-text is turned off'), { status: 503 }));
+  await open(); await speakAnswer();
+  fireEvent.click(await screen.findByRole('button', { name: 'Type your answer instead' }));
+  const box = await screen.findByRole('textbox', { name: 'Your answer' });
+  fireEvent.keyDown(box, { key: 'S' });
+  fireEvent.change(box, { target: { value: 'S' } });
+  fireEvent.change(box, { target: { value: 'State is local data.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Submit Answer' }));
+  await screen.findByRole('heading', { name: 'Answer Result' });
+  const payload = api.submitAnswer.mock.calls[0][1];
+  expect(payload.candidateAnswer).toBe('State is local data.');
+  expect(payload.answerSignals.typing).toBeDefined();
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(1);
+});

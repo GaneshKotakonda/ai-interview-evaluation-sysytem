@@ -276,6 +276,20 @@ it('asks again once when no speech is detected, then records an empty answer', a
   expect(api.submitAnswer).toHaveBeenCalledWith('session-1', expect.objectContaining({ candidateAnswer: '' }));
 });
 
+it('never submits an empty answer when speech-to-text fails; retry resends the same recording', async () => {
+  api.transcribeAnswer.mockRejectedValueOnce(Object.assign(new Error('Could not transcribe.'), { status: 503 }));
+  await startAndListen();
+  fireEvent.click(screen.getByRole('button', { name: /Next Question/ }));
+  expect(await screen.findByText(/could not turn your recording into text/)).toBeInTheDocument();
+  expect(api.submitAnswer).not.toHaveBeenCalled();
+  expect(speech.speak).not.toHaveBeenCalledWith({ phrase: 'no_speech' }, expect.any(String));
+  fireEvent.click(screen.getByRole('button', { name: 'Retry Submission' }));
+  await screen.findByText(next.question);
+  expect(api.transcribeAnswer).toHaveBeenCalledTimes(2);
+  expect(api.transcribeAnswer.mock.calls[1][2]).toBe(api.transcribeAnswer.mock.calls[0][2]);
+  expect(api.submitAnswer.mock.calls[0][1].candidateAnswer).toBe('Use resources and HTTP verbs.');
+});
+
 it('keeps the answer through a failed submission and retries without re-transcribing', async () => {
   api.submitAnswer.mockRejectedValueOnce(new Error('offline'));
   await startAndListen();

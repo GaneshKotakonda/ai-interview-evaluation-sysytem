@@ -164,6 +164,45 @@ def finalize(cur, interview, end_reason=None):
     return {'ratings': ratings, 'integrity': summary, 'final_score': final}
 
 
+# Inactive this long, an unfinished ranked game counts as abandoned.
+ABANDONED_AFTER_MINUTES = 30
+
+
+def close_abandoned(cur, user_id, idle_minutes=None):
+    """Close this user's unfinished ranked Arena games on the server.
+
+    Ratings change only in finalize(), which the browser triggers; closing
+    the tab or reloading (each load starts a new game) would otherwise leave
+    a bad game unrated forever, a free retry. Called before a new game starts
+    (every unfinished game) and when the user opens their results or ranking
+    (games idle for ``idle_minutes``).
+      * a game with answered levels ends as "away": unplayed levels score 0
+        and the leaving penalty applies, as if the candidate had left;
+      * a game abandoned before any answer (e.g. on the "Ready to play?"
+        screen) is marked "abandoned" with no rating change.
+    Games locked by a request still in flight are skipped. Returns the ids closed.
+    """
+    cur.execute(
+        """SELECT i.* FROM interviews i
+           WHERE i.user_id = %s AND i.interview_mode = 'game' AND i.status = 'in_progress'
+             AND (%s::int IS NULL OR GREATEST(i.created_at, COALESCE(
+                   (SELECT MAX(r.created_at) FROM interview_responses r WHERE r.interview_id = i.id),
+                   i.created_at)) < NOW() - make_interval(mins => COALESCE(%s::int, 0)))
+           FOR UPDATE OF i SKIP LOCKED;""",
+        (str(user_id), idle_minutes, idle_minutes),
+    )
+    closed = []
+    for game in cur.fetchall():
+        cur.execute('SELECT 1 FROM interview_responses WHERE interview_id = %s LIMIT 1;', (str(game['id']),))
+        if cur.fetchone():
+            finalize(cur, game, end_reason='away')
+        else:
+            cur.execute("""UPDATE interviews SET status = 'abandoned', completed_at = NOW(),
+                           ended_early = TRUE, end_reason = 'away' WHERE id = %s;""", (str(game['id']),))
+        closed.append(str(game['id']))
+    return closed
+
+
 # -------------------------------------------------------------
 # BLOCK 4: Final results summary
 # -------------------------------------------------------------

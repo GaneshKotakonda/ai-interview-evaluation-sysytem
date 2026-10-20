@@ -73,6 +73,20 @@ export function IntegrityOverlays({ guard, sessionLabel = 'interview' }) {
 
 function IntegrityDialogs({ guard, sessionLabel }) {
   const { away, warning, violations, maxViolations, awayLeft, maxAwaySeconds } = guard;
+  if (away && guard.counting === false) {
+    // Grace period before Question 1: ask them back; nothing is counted yet.
+    return (
+      <Dialog
+        id="away-title"
+        title="Please return to fullscreen"
+        action={<button className="primary-btn mt-6 w-full !py-3" onClick={guard.returnToInterview}>Return to the {sessionLabel}</button>}
+      >
+        <p className="mt-3 text-sm leading-relaxed text-ink-2">
+          The {sessionLabel} runs in fullscreen. This does not count as a warning: warnings start with the first question.
+        </p>
+      </Dialog>
+    );
+  }
   if (away) {
     return (
       <Dialog
@@ -116,7 +130,7 @@ export function rulesFor({ maxViolations, maxAwaySeconds, arena }) {
     ['Stay on this screen', `It runs in fullscreen. Switching tabs, windows or apps is a warning; staying away ${maxAwaySeconds} seconds ends it immediately.`],
     ['Stay visible', 'Keep your face in view. Your face and voice are checked against the identity check throughout.'],
     ['Your own words and code', 'No copying, pasting, auto-typing or dictation tools.'],
-    ['Warnings', `After ${maxViolations} warnings it ends and unanswered questions score 0.${arena ? ' In the Arena every warning also lowers your rating.' : ''}`],
+    ['Warnings', `Warnings count from the first question. After ${maxViolations} warnings it ends and unanswered questions score 0.${arena ? ' In the Arena every warning also lowers your rating.' : ''}`],
   ];
 }
 

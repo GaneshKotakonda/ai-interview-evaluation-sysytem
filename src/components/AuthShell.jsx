@@ -36,7 +36,7 @@ export default function AuthShell({ title, description, children, footer }) {
             {footer && <p className="mt-8 text-sm text-ink-3">{footer}</p>}
           </div>
         </div>
-        <p className="text-xs text-ink-4">Camera and microphone data stay in your browser during practice.</p>
+        <p className="text-xs text-ink-2">Interviews are recorded on camera and microphone and uploaded so your answers can be evaluated.</p>
       </section>
 
       <aside className="relative hidden overflow-hidden bg-ink p-12 text-paper lg:flex lg:flex-col lg:justify-between">

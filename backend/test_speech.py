@@ -248,7 +248,7 @@ class TranscribeEndpointTests(unittest.TestCase):
                 main.transcribe_answer(INTERVIEW_ID, 1, upload(), user=USER)
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_transcription_failure_is_a_clear_422(self):
+    def test_transcription_failure_is_a_503_not_no_speech(self):
         cursor = self._cursor()
         with tempfile.TemporaryDirectory() as folder, patch.object(main, "UPLOAD_DIR", folder), \
                 patch.object(main.database, "get_db_connection", return_value=FakeConnection(cursor)), \
@@ -256,7 +256,7 @@ class TranscribeEndpointTests(unittest.TestCase):
                              side_effect=stt_service.TranscriptionError("Could not transcribe.")):
             with self.assertRaises(HTTPException) as ctx:
                 main.transcribe_answer(INTERVIEW_ID, 1, upload(), user=USER)
-        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (422, "Could not transcribe."))
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (503, "Could not transcribe."))
 
 
 # -------------------------------------------------------------

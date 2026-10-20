@@ -110,6 +110,8 @@ export default function Interview() {
     // A phone, another person or background noise stays on screen until the
     // detector confirms it has stopped, not until the candidate closes it.
     persistentWarnings: true,
+    // Setup and the rules are a grace period: warnings count from Question 1.
+    countFromFirstQuestion: true,
     context: () => ({
       part: sessionRef.current?.part ?? null,
       at: sessionRef.current ? sessionRef.current.elapsedSeconds() : null,
@@ -303,6 +305,7 @@ export default function Interview() {
   const askQuestion = useCallback(async (nextQuestion, id) => {
     if (unmountedRef.current || guard.isTerminated()) return;
     setQuestion(nextQuestion);
+    guard.startCounting();
     answerObservationStartRef.current = sessionRef.current?.elapsedSeconds() ?? null;
     guard.beginAnswer(nextQuestion.index);
     setTypedAnswer('');
@@ -443,11 +446,16 @@ export default function Interview() {
         pendingAudioRef.current = null;
       }
       await submitAndAdvance(interviewId, question);
-    } catch {
+    } catch (error) {
       if (guard.isTerminated()) return;
+      // 503 from /transcribe: the server could not turn the recording into
+      // text. The recording is kept (pendingAudioRef), so Retry resends it;
+      // it is never submitted as an empty answer.
       setFlowError(responseIdRef.current
         ? 'Your answer is saved. Retry to continue to the next question.'
-        : 'We could not save your answer. Check your connection and retry; nothing has been lost.');
+        : error?.status === 503 && pendingAudioRef.current
+          ? 'We could not turn your recording into text. Your recording is kept; retry in a moment.'
+          : 'We could not save your answer. Check your connection and retry; nothing has been lost.');
       setStage('retry');
     } finally {
       busyRef.current = false;

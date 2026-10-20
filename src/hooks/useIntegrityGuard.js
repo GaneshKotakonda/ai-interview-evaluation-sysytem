@@ -16,6 +16,11 @@
 //     (a phone in view, more than one person, background noise). Each is
 //     set and cleared only by its own detector, never by the candidate
 //     closing the warning, so the page can keep showing it until it stops.
+//   * with `countFromFirstQuestion`, a grace period: until the page calls
+//     startCounting() (when Question 1 is asked), leaving or a detected
+//     problem is shown and recorded as "before_start" but never counted,
+//     and staying away cannot end the session. Setup friction, such as the
+//     browser leaving fullscreen to show its camera prompt, is not cheating.
 //
 // Every function reads refs, so callbacks created early never go stale.
 // The page decides what "ending" means through onTerminate(reason), with
@@ -56,11 +61,14 @@ const newEventId = (type) => `${type}-${Date.now().toString(36)}-${Math.random()
 
 export function useIntegrityGuard({
   videoRef, monitorRef, turnRef, context, onTerminate, gazeWarnings = false, persistentWarnings = false,
+  countFromFirstQuestion = false,
 }) {
   const [violations, setViolations] = useState(0);
   const [maxViolations, setMaxViolations] = useState(3);
   const [maxAwaySeconds, setMaxAwaySeconds] = useState(5);
   const [away, setAway] = useState(null);
+  // False during the grace period before Question 1 (countFromFirstQuestion).
+  const [counting, setCounting] = useState(!countFromFirstQuestion);
   const [awayLeft, setAwayLeft] = useState(null);
   const [warning, setWarning] = useState(null);
   // Soft, non-blocking reminder to look at the screen (opt-in, never counted).
@@ -75,6 +83,7 @@ export function useIntegrityGuard({
     watching: false, terminated: false, warning: null, identity: { enabled: false, enrolled: false },
     attention: createAttentionTracker(), attentionTimer: null, gazeWarnings,
     persistent: persistentWarnings, conditions: {}, noise: createBackgroundNoiseTracker(),
+    counting: !countFromFirstQuestion, graceEpisodes: new Set(),
     snapshotTimer: null, snapshotBusy: false, awayTimer: null, outsideSince: null, warned: {}, openEpisodes: {},
     episodes: {
       extra_person: createEpisode({ startAfterMs: 1500, endAfterMs: 3000 }),
@@ -168,8 +177,21 @@ export function useIntegrityGuard({
       setAttention(null);
     };
 
+    // Warnings count from now on (idempotent). Called when Question 1 is asked.
+    g.startCounting = () => {
+      if (s.counting) return;
+      s.counting = true;
+      setCounting(true);
+    };
+    g.isCounting = () => s.counting;
+
     g.registerViolation = (type, details = {}, id = newEventId(type)) => {
       if (!s.watching || s.terminated) return;
+      if (!s.counting) {
+        // Grace period: recorded for the report, not counted, no warning.
+        g.queueEvent({ id, type: 'before_start', ...g.context(), details: { ...details, type } });
+        return;
+      }
       s.violations += 1;
       setViolations(s.violations);
       g.queueEvent({ id, type, ...g.context(), details });
@@ -226,7 +248,7 @@ export function useIntegrityGuard({
       if (phase === 'start') {
         if (s.watching && !s.terminated) g.setCondition(type, true);
         const id = newEventId(type);
-        s.openEpisodes[type] = { id, context: g.context(), startedAt: performance.now() };
+        s.openEpisodes[type] = { id, context: g.context(), startedAt: performance.now(), grace: !s.counting };
         // A book is only recorded. Background noise heard after the same
         // answer's "another voice" warning is the same incident: recorded,
         // shown, not counted twice.
@@ -239,7 +261,8 @@ export function useIntegrityGuard({
       const open = s.openEpisodes[type];
       if (!open) return;
       delete s.openEpisodes[type];
-      g.queueEvent({ id: open.id, type, ...open.context, duration: Math.round((performance.now() - open.startedAt) / 100) / 10, details });
+      g.queueEvent({ id: open.id, type: open.grace ? 'before_start' : type, ...open.context,
+        duration: Math.round((performance.now() - open.startedAt) / 100) / 10, details: open.grace ? { ...details, type } : details });
       // Someone left the frame or came back: re-check who is there.
       if (type === 'extra_person' || type === 'face_absent') setTimeout(() => g.takeSnapshot(), 1500);
     };
@@ -354,6 +377,14 @@ export function useIntegrityGuard({
       s.proctor = startProctoring({
         context: g.context,
         onLeave: (episode) => {
+          if (!s.counting) {
+            // Grace period: ask them back, record it, but do not count it or
+            // start the away countdown.
+            s.graceEpisodes.add(episode.id);
+            setAway(episode);
+            g.queueEvent({ ...episode, type: 'before_start', details: { types: [...episode.types] } });
+            return;
+          }
           s.violations += 1;
           setViolations(s.violations);
           setAway(episode);
@@ -364,7 +395,8 @@ export function useIntegrityGuard({
         onReturn: (episode) => {
           stopAwayTimer();
           setAway(null);
-          g.queueEvent({ ...episode, details: { types: episode.types } });
+          const grace = s.graceEpisodes.delete(episode.id);
+          g.queueEvent({ ...episode, ...(grace ? { type: 'before_start' } : {}), details: { types: episode.types } });
         },
         onMinor: (event) => g.queueEvent(event),
       });
@@ -425,8 +457,8 @@ export function useIntegrityGuard({
   // Stable between state changes, so callbacks depending on it rarely change.
   return useMemo(() => ({
     ...guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled,
-    persistentWarnings, conditions,
+    persistentWarnings, conditions, counting,
     // Active persistent warnings, in a fixed order: [{ type, message }]
     activeWarnings: Object.keys(PERSISTENT_WARNINGS).filter((type) => conditions[type]).map((type) => ({ type, message: PERSISTENT_WARNINGS[type] })),
-  }), [guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled, persistentWarnings, conditions]);
+  }), [guard, violations, maxViolations, maxAwaySeconds, away, awayLeft, warning, attention, terminated, enrolled, persistentWarnings, conditions, counting]);
 }

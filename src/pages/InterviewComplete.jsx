@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, Check } from 'lucide-react';
+import { ArrowRight, Check, Minus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import {
   FlowSteps, Notice, Panel, SectionTitle, Spinner,
 } from '../components/ui';
 import { api } from '../services/api';
-import { STORAGE_KEYS, readInterviewJourney } from '../utils/interviewJourney';
+import { STORAGE_KEYS, clearInterviewProgress, readInterviewJourney } from '../utils/interviewJourney';
 
 // -------------------------------------------------------------
 // BLOCK 1: Utility Functions
@@ -96,52 +96,66 @@ export default function InterviewComplete() {
   }, [duration, interviewId, attempt]);
 
   // -------------------------------------------------------------
-  // BLOCK 4: Dynamic Analysis Checklist Items
+  // BLOCK 4: What was actually measured
   // -------------------------------------------------------------
-  const totalFillers = evaluationReport?.nlp_metrics?.total_fillers ?? 0;
+  // Each row is driven by the report data: "done" (with the real result),
+  // "skipped" (with the reason) or still running. Nothing is ticked just
+  // because loading finished.
+  const report = evaluationReport;
+  const answered = report?.completion?.answered ?? journey.length;
+  const total = report?.completion?.total;
+  // The interview stopped before any answer: nothing was graded (no score).
+  const notScored = report?.scored === false;
   const eyeContactVal = visionMetrics?.eyeContact;
+  const wpm = report?.speech_metrics?.words_per_minute;
+  const status = (done, doneText, skippedText) => (
+    evaluating || !report
+      ? { kind: 'pending', text: 'Working…' }
+      : done ? { kind: 'done', text: doneText } : { kind: 'skipped', text: skippedText }
+  );
 
   const analysisItems = [
     {
-      label: 'Speech & Text Alignment',
-      state: evaluating
-        ? 'Collecting saved answer evaluations...'
-        : 'Rubric similarity matched',
-      complete: !evaluating && !evaluationError,
+      label: 'Answers graded',
+      ...status(answered > 0,
+        `${answered}${total ? ` of ${total}` : ''} ${answered === 1 ? 'answer' : 'answers'} graded against the role’s rubric`,
+        'No answers to grade'),
     },
     {
-      label: 'RAG Answer Evaluation',
-      state: evaluating
-        ? 'Aggregating saved technical scores...'
-        : 'Multi-criteria scores computed',
-      complete: !evaluating && !evaluationError,
+      label: 'Answer criteria',
+      ...status(Boolean(report?.criteria_scores),
+        'Correctness, completeness, depth and relevance scored', 'Not scored: no answers'),
     },
     {
-      label: 'Communication Analysis',
-      state: evaluating
-        ? 'Combining saved communication metrics...'
-        : evaluationReport?.speech_metrics?.words_per_minute
-          ? `${evaluationReport.speech_metrics.words_per_minute} words/min · ${evaluationReport.speech_metrics.fillers_per_minute} fillers/min`
-          : `${totalFillers} filler words analysed`,
-      complete: !evaluating && !evaluationError,
+      label: 'Speaking',
+      ...status(answered > 0,
+        wpm ? `${wpm} words/min · ${report.speech_metrics.fillers_per_minute} fillers/min`
+          : `${report?.nlp_metrics?.total_fillers ?? 0} filler words found`,
+        'No spoken answers'),
     },
     {
-      label: 'Camera Engagement',
-      state: Number.isFinite(eyeContactVal)
-        ? `Approximate screen gaze: ${eyeContactVal}%`
-        : 'Not measured · camera analysis was unavailable',
-      complete: true,
+      label: 'Camera presence',
+      ...status(Number.isFinite(eyeContactVal), `Approximate screen gaze: ${eyeContactVal}%`, 'Not measured'),
     },
   ];
+  const penalised = Boolean(report?.integrity?.answers_zeroed || report?.integrity?.answers_capped);
 
   // -------------------------------------------------------------
   // BLOCK 5: Render Submission Confirmation & AI Status View
   // -------------------------------------------------------------
+  const answeredText = answered === 0 ? 'None' : `${answered} ${answered === 1 ? 'question' : 'questions'}`;
   const facts = [
-    ['Questions answered', `${journey.length} ${journey.length === 1 ? 'Question' : 'Questions'}`],
+    ['Questions answered', answeredText],
     ['Duration', formatDuration(duration)],
-    ['Evaluation', evaluating ? 'Grading…' : evaluationError ? 'Report pending' : 'Evaluated'],
+    ['Evaluation', evaluating ? 'Grading…' : evaluationError ? 'Report pending' : notScored ? 'Not scored' : 'Evaluated'],
   ];
+  const reasonText = endReason === 'away' ? 'You stayed outside the interview for too long.' : 'The interview ended after repeated integrity warnings.';
+  const title = !endedEarly ? 'Interview complete'
+    : notScored ? 'Interview stopped before the first answer' : 'Interview ended early';
+  const startAgain = () => {
+    clearInterviewProgress();
+    navigate('/readiness');
+  };
 
   return (
     <div className="mx-auto max-w-3xl space-y-8">
@@ -152,13 +166,17 @@ export default function InterviewComplete() {
           {/* Drawn check mark */}
           <svg viewBox="0 0 64 64" className="mx-auto h-16 w-16" aria-hidden="true">
             <circle cx="32" cy="32" r="29" fill="none" stroke="#171611" strokeWidth="2" pathLength="100" className="draw" style={{ '--len': 100 }} />
-            <path d="M20 33 l8 8 l16 -17" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />
-          </svg>
-          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>{endedEarly ? 'Interview ended early' : 'Interview complete'}</h1>
-          <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
             {endedEarly
-              ? `${endReason === 'away' ? 'You stayed outside the interview for too long.' : 'The interview ended after repeated integrity warnings.'} Your answers so far are saved; unanswered questions score 0.`
-              : 'Your answers and recordings are saved. We are combining every turn into your final report.'}
+              ? <path d="M22 32 h20" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />
+              : <path d="M20 33 l8 8 l16 -17" fill="none" stroke="#171611" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" pathLength="100" className="draw" style={{ '--len': 100, '--delay': '450ms' }} />}
+          </svg>
+          <h1 className="reveal mt-6 font-serif text-[2.4rem] tracking-[-0.02em] leading-none text-ink" style={{ '--i': 2 }}>{title}</h1>
+          <p className="reveal mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-ink-2" style={{ '--i': 3 }}>
+            {!endedEarly
+              ? 'Your answers and recordings are saved. We are combining every turn into your final report.'
+              : notScored
+                ? `${reasonText} Nothing was graded, so this interview has no score and does not count towards your averages.`
+                : `${reasonText} Your answers so far are saved; unanswered questions score 0.`}
           </p>
 
           <dl className="reveal mx-auto mt-8 grid max-w-xl grid-cols-3 divide-x divide-line rounded-control border border-line" style={{ '--i': 4 }}>
@@ -173,10 +191,11 @@ export default function InterviewComplete() {
 
         <div className="border-t border-line bg-paper/60 px-6 py-6 sm:px-10">
           <SectionTitle
-            title="Building your report"
+            title={notScored ? 'What was recorded' : 'Building your report'}
             description={evaluating
               ? 'Combining saved answer evaluations and camera metrics.'
-              : evaluationError ? 'Report generation needs a retry.' : 'Your final report is ready.'}
+              : evaluationError ? 'Report generation needs a retry.'
+                : notScored ? 'The report lists the integrity events that stopped the interview.' : 'Your final report is ready.'}
           />
 
           {evaluationError && <Notice tone="warn" className="mt-4">{evaluationError}</Notice>}
@@ -187,41 +206,53 @@ export default function InterviewComplete() {
           )}
           {evaluationReport?.integrity?.verdict === 'review' && (
             <Notice tone="warn" className="mt-4">
-              Integrity issues were found and some answers were penalised. The report&apos;s Integrity section explains why.
+              {penalised
+                ? 'Integrity issues were found and some answers were penalised. The report’s Integrity section explains why.'
+                : 'Integrity issues were found. The report’s Integrity section explains them.'}
             </Notice>
           )}
 
-          <ol className="mt-5 space-y-1">
-            {analysisItems.map((item, index) => (
-              <li key={item.label} className="reveal flex items-center gap-3 py-2" style={{ '--i': index + 5 }}>
-                <span
-                  className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border transition duration-300 ${
-                    item.complete ? 'border-ink bg-ink text-paper' : 'border-line-strong text-ink-3'
-                  }`}
-                >
-                  {item.complete ? <Check key="done" className="scale-in h-3.5 w-3.5" strokeWidth={2.5} /> : <Spinner className="h-3.5 w-3.5" />}
-                </span>
-                <span className="min-w-0 flex-1 text-sm text-ink">{item.label}</span>
-                <span className={`text-right text-xs ${item.complete ? 'text-ink-3' : 'text-ink-2'}`}>
-                  {evaluationError && !item.complete ? 'Waiting for report generation' : item.state}
-                </span>
-              </li>
-            ))}
-          </ol>
+          {!notScored && (
+            <ol className="mt-5 space-y-1">
+              {analysisItems.map((item, index) => (
+                <li key={item.label} className="reveal flex items-center gap-3 py-2" style={{ '--i': index + 5 }}>
+                  <span
+                    className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border transition duration-300 ${
+                      item.kind === 'done' ? 'border-ink bg-ink text-paper' : 'border-line-strong text-ink-2'
+                    }`}
+                  >
+                    {item.kind === 'done' && <Check key="done" className="scale-in h-3.5 w-3.5" strokeWidth={2.5} aria-hidden="true" />}
+                    {item.kind === 'skipped' && <Minus className="h-3.5 w-3.5" aria-hidden="true" />}
+                    {item.kind === 'pending' && <Spinner className="h-3.5 w-3.5" />}
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm text-ink">{item.label}</span>
+                  <span className="text-right text-xs text-ink-2">
+                    {evaluationError && item.kind === 'pending' ? 'Waiting for report generation' : item.text}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
 
           <div className="mt-7 flex flex-wrap items-center justify-between gap-3">
             {evaluationError && interviewId ? (
               <button className="secondary-btn" disabled={evaluating} onClick={() => setAttempt((value) => value + 1)}>
                 Retry Report Generation
               </button>
+            ) : notScored ? (
+              <button className="secondary-btn" onClick={() => navigate('/report')}>View Details</button>
             ) : <span />}
-            <button
-              onClick={() => navigate('/report')}
-              disabled={evaluating || !evaluationReport}
-              className="primary-btn"
-            >
-              {evaluating ? <><Spinner /> Finalizing AI Report…</> : <>View Evaluation Report <ArrowRight className="h-4 w-4" /></>}
-            </button>
+            {notScored ? (
+              <button onClick={startAgain} className="primary-btn">Start Again <ArrowRight className="h-4 w-4" /></button>
+            ) : (
+              <button
+                onClick={() => navigate('/report')}
+                disabled={evaluating || !evaluationReport}
+                className="primary-btn"
+              >
+                {evaluating ? <><Spinner /> Finalizing AI Report…</> : <>View Evaluation Report <ArrowRight className="h-4 w-4" /></>}
+              </button>
+            )}
           </div>
         </div>
       </Panel>
